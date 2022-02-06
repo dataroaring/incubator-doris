@@ -202,6 +202,7 @@ module.exports = [
       "bucket-shuffle-join",
       "dynamic-partition",
       "export-manual",
+      "export_with_mysql_dump",
       "outfile",
       "privilege",
       "ldap",
@@ -236,6 +237,7 @@ module.exports = [
       "logstash",
       "odbc-of-doris",
       "hive-of-doris",
+      "iceberg-of-doris",
       "plugin-development-manual",
       "spark-doris-connector",
       "flink-doris-connector",
@@ -367,6 +369,7 @@ module.exports = [
               "starts_with",
               "strleft",
               "strright",
+              "substring",
               "unhex",
               {
                 title: "fuzzy match",
@@ -489,7 +492,7 @@ module.exports = [
         ],
       },
       {
-        title: "DDL Statements",
+        title: "SQL Statements",
         directoryPath: "sql-statements/",
         children: [
           {
@@ -522,7 +525,6 @@ module.exports = [
               "ADMIN SHOW CONFIG",
               "ADMIN SHOW REPLICA DISTRIBUTION",
               "ADMIN SHOW REPLICA STATUS",
-              "ADMIN-SHOW-DATA-SKEW",
               "ALTER CLUSTER",
               "ALTER SYSTEM",
               "CANCEL DECOMMISSION",
@@ -614,6 +616,7 @@ module.exports = [
               "SHOW CREATE FUNCTION",
               "SHOW CREATE ROUTINE LOAD",
               "SHOW DATA",
+              "SHOW DATA SKEW",
               "SHOW DATABASES",
               "SHOW DELETE",
               "SHOW DYNAMIC PARTITION TABLES",
@@ -628,6 +631,7 @@ module.exports = [
               "SHOW SNAPSHOT",
               "SHOW SYNC JOB",
               "SHOW TABLES",
+              "SHOW TABLE CREATION",
               "SHOW TABLET",
               "SHOW TRANSACTION",
               "STOP ROUTINE LOAD",

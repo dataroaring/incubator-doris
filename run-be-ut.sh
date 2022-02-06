@@ -126,9 +126,17 @@ else
     echo "=== Running All tests ==="
 fi
 
+MAKE_PROGRAM="$(which "${BUILD_SYSTEM}")"
+echo "-- Make program: ${MAKE_PROGRAM}"
+
 cd ${CMAKE_BUILD_DIR}
-${CMAKE_CMD} -G "${GENERATOR}" ../ -DWITH_MYSQL=OFF -DMAKE_TEST=ON -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
-    -DGLIBC_COMPATIBILITY=${GLIBC_COMPATIBILITY} ${CMAKE_USE_CCACHE}
+${CMAKE_CMD} -G "${GENERATOR}" \
+    -DCMAKE_MAKE_PROGRAM="${MAKE_PROGRAM}" \
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+    -DMAKE_TEST=ON \
+    -DGLIBC_COMPATIBILITY="${GLIBC_COMPATIBILITY}" \
+    -DWITH_MYSQL=OFF \
+    ${CMAKE_USE_CCACHE} ../
 ${BUILD_SYSTEM} -j ${PARALLEL} $RUN_FILE
 
 if [ ${RUN} -ne 1 ]; then
@@ -152,6 +160,14 @@ done
 mkdir -p $LOG_DIR
 mkdir -p ${UDF_RUNTIME_DIR}
 rm -f ${UDF_RUNTIME_DIR}/*
+
+# clean all gcda file
+
+gcda_files=`find ${DORIS_TEST_BINARY_DIR} -name "*gcda"`
+for gcda_file in ${gcda_files[@]}
+do
+    rm $gcda_file
+done
 
 export DORIS_TEST_BINARY_DIR=${DORIS_TEST_BINARY_DIR}/test/
 

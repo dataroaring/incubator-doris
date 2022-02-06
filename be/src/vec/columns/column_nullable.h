@@ -101,6 +101,11 @@ public:
         get_null_map_data().resize_fill(get_null_map_data().size() + length, 1);
     }
 
+    void insert_null_elements(int num) {
+        get_nested_column().insert_many_defaults(num);
+        get_null_map_column().insert_elements(1, num);
+    }
+
     void pop_back(size_t n) override;
     ColumnPtr filter(const Filter& filt, ssize_t result_size_hint) const override;
     ColumnPtr filter_by_selector(const uint16_t* sel, size_t sel_size,
@@ -116,6 +121,7 @@ public:
     size_t allocated_bytes() const override;
     void protect() override;
     ColumnPtr replicate(const Offsets& replicate_offsets) const override;
+    void replicate(const uint32_t* counts, size_t target_size, IColumn& column) const override;
     void update_hash_with_value(size_t n, SipHash& hash) const override;
     void get_extremes(Field& min, Field& max) const override;
 

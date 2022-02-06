@@ -676,6 +676,14 @@ public class StmtExecutor implements ProfileWriter {
                 }
                 if (explainOptions != null) parsedStmt.setIsExplain(explainOptions);
             }
+            
+            if (parsedStmt instanceof InsertStmt && parsedStmt.isExplain()) {
+                if (ConnectContext.get() != null &&
+                        ConnectContext.get().getExecutor() != null &&
+                        ConnectContext.get().getExecutor().getParsedStmt() != null) {
+                    ConnectContext.get().getExecutor().getParsedStmt().setIsExplain(new ExplainOptions(true, false));
+                }
+            }
         }
         plannerProfile.setQueryAnalysisFinishTime();
 
@@ -1212,6 +1220,7 @@ public class StmtExecutor implements ProfileWriter {
         }
 
         if (insertStmt.getQueryStmt().isExplain()) {
+            insertStmt.setIsExplain(new ExplainOptions(true, false));
             String explainString = planner.getExplainString(planner.getFragments(), new ExplainOptions(true, false));
             handleExplainStmt(explainString);
             return;

@@ -151,6 +151,8 @@ import org.apache.doris.deploy.impl.AmbariDeployManager;
 import org.apache.doris.deploy.impl.K8sDeployManager;
 import org.apache.doris.deploy.impl.LocalFileDeployManager;
 import org.apache.doris.external.elasticsearch.EsRepository;
+import org.apache.doris.external.iceberg.IcebergCatalogMgr;
+import org.apache.doris.external.iceberg.IcebergTableCreationRecordMgr;
 import org.apache.doris.ha.BDBHA;
 import org.apache.doris.ha.FrontendNodeType;
 import org.apache.doris.ha.HAProtocol;
@@ -327,6 +329,7 @@ public class Catalog {
     private Load load;
     private LoadManager loadManager;
     private StreamLoadRecordMgr streamLoadRecordMgr;
+    private IcebergTableCreationRecordMgr icebergTableCreationRecordMgr;
     private RoutineLoadManager routineLoadManager;
     private SqlBlockRuleMgr sqlBlockRuleMgr;
     private ExportMgr exportMgr;
@@ -595,6 +598,7 @@ public class Catalog {
         this.loadJobScheduler = new LoadJobScheduler();
         this.loadManager = new LoadManager(loadJobScheduler);
         this.streamLoadRecordMgr = new StreamLoadRecordMgr("stream_load_record_manager", Config.fetch_stream_load_record_interval_second * 1000);
+        this.icebergTableCreationRecordMgr = new IcebergTableCreationRecordMgr();
         this.loadEtlChecker = new LoadEtlChecker(loadManager);
         this.loadLoadingChecker = new LoadLoadingChecker(loadManager);
         this.routineLoadScheduler = new RoutineLoadScheduler(routineLoadManager);
@@ -1370,6 +1374,7 @@ public class Catalog {
         // start daemon thread to update global partition in memory information periodically
         partitionInMemoryInfoCollector.start();
         streamLoadRecordMgr.start();
+        icebergTableCreationRecordMgr.start();
     }
 
     // start threads that should running on all FE
@@ -2631,7 +2636,14 @@ public class Catalog {
     public void createDb(CreateDbStmt stmt) throws DdlException {
         final String clusterName = stmt.getClusterName();
         String fullDbName = stmt.getFullDbName();
-        long id = 0L;
+        Map<String, String> properties = stmt.getProperties();
+
+        long id = getNextId();
+        Database db = new Database(id, fullDbName);
+        db.setClusterName(clusterName);
+        // check and analyze database properties before create database
+        db.getDbProperties().addAndBuildProperties(properties);
+
         if (!tryLock(false)) {
             throw new DdlException("Failed to acquire catalog lock. Try again");
         }
@@ -2647,9 +2659,6 @@ public class Catalog {
                     ErrorReport.reportDdlException(ErrorCode.ERR_DB_CREATE_EXISTS, fullDbName);
                 }
             } else {
-                id = getNextId();
-                Database db = new Database(id, fullDbName);
-                db.setClusterName(clusterName);
                 unprotectCreateDb(db);
                 editLog.logCreateDb(db);
             }
@@ -2657,6 +2666,11 @@ public class Catalog {
             unlock();
         }
         LOG.info("createDb dbName = " + fullDbName + ", id = " + id);
+
+        // create tables in iceberg database
+        if (db.getDbProperties().getIcebergProperty().isExist()) {
+            icebergTableCreationRecordMgr.registerDb(db);
+        }
     }
 
     // For replay edit log, need't lock metadata
@@ -2771,6 +2785,10 @@ public class Catalog {
     }
 
     public void unprotectDropDb(Database db, boolean isForeDrop, boolean isReplay) {
+        // drop Iceberg database table creation records
+        if (db.getDbProperties().getIcebergProperty().isExist()) {
+            icebergTableCreationRecordMgr.deregisterDb(db);
+        }
         for (Table table : db.getTables()) {
             table.writeLock();
             try {
@@ -3062,6 +3080,9 @@ public class Catalog {
         } else if (engineName.equalsIgnoreCase("hive")) {
             createHiveTable(db, stmt);
             return;
+        } else if (engineName.equalsIgnoreCase("iceberg")) {
+            IcebergCatalogMgr.createIcebergTable(db, stmt);
+            return;
         } else {
             ErrorReport.reportDdlException(ErrorCode.ERR_UNKNOWN_STORAGE_ENGINE, engineName);
         }
@@ -3233,7 +3254,8 @@ public class Catalog {
                     }
                 }
             } else {
-                distributionInfo = defaultDistributionInfo;
+                // make sure partition-dristribution-info is deep copied from default-distribution-info
+                distributionInfo = defaultDistributionInfo.toDistributionDesc().toDistributionInfo(baseSchema);
             }
 
             // check colocation
@@ -3673,7 +3695,7 @@ public class Catalog {
         // create distribution info
         DistributionDesc distributionDesc = stmt.getDistributionDesc();
         Preconditions.checkNotNull(distributionDesc);
-        DistributionInfo distributionInfo = distributionDesc.toDistributionInfo(baseSchema);
+        DistributionInfo defaultDistributionInfo = distributionDesc.toDistributionInfo(baseSchema);
 
         // calc short key column count
         short shortKeyColumnCount = Catalog.calcShortKeyColumnCount(baseSchema, stmt.getProperties());
@@ -3685,7 +3707,7 @@ public class Catalog {
         // create table
         long tableId = Catalog.getCurrentCatalog().getNextId();
         OlapTable olapTable = new OlapTable(tableId, tableName, baseSchema, keysType, partitionInfo,
-                distributionInfo, indexes);
+                defaultDistributionInfo, indexes);
         olapTable.setComment(stmt.getComment());
 
         // set base index id
@@ -3858,12 +3880,13 @@ public class Catalog {
             if (partitionInfo.getType() == PartitionType.UNPARTITIONED) {
                 // this is a 1-level partitioned table
                 // use table name as partition name
+                DistributionInfo partitionDistributionInfo = distributionDesc.toDistributionInfo(baseSchema);
                 String partitionName = tableName;
                 long partitionId = partitionNameToId.get(partitionName);
 
                 // check replica quota if this operation done
                 long indexNum = olapTable.getIndexIdToMeta().size();
-                long bucketNum = distributionInfo.getBucketNum();
+                long bucketNum = partitionDistributionInfo.getBucketNum();
                 long replicaNum = partitionInfo.getReplicaAllocation(partitionId).getTotalReplicaNum();
                 long totalReplicaNum = indexNum * bucketNum * replicaNum;
                 if (totalReplicaNum >= db.getReplicaQuotaLeftWithLock()) {
@@ -3876,7 +3899,7 @@ public class Catalog {
                         olapTable.getId(), olapTable.getBaseIndexId(),
                         partitionId, partitionName,
                         olapTable.getIndexIdToMeta(),
-                        distributionInfo,
+                        partitionDistributionInfo,
                         partitionInfo.getDataProperty(partitionId).getStorageMedium(),
                         partitionInfo.getReplicaAllocation(partitionId),
                         versionInfo, bfColumns, bfFpp,
@@ -3910,7 +3933,7 @@ public class Catalog {
                 long totalReplicaNum = 0;
                 for (Map.Entry<String, Long> entry : partitionNameToId.entrySet()) {
                     long indexNum = olapTable.getIndexIdToMeta().size();
-                    long bucketNum = distributionInfo.getBucketNum();
+                    long bucketNum = defaultDistributionInfo.getBucketNum();
                     long replicaNum = partitionInfo.getReplicaAllocation(entry.getValue()).getTotalReplicaNum();
                     totalReplicaNum += indexNum * bucketNum * replicaNum;
                 }
@@ -3923,9 +3946,10 @@ public class Catalog {
                 // this is a 2-level partitioned tables
                 for (Map.Entry<String, Long> entry : partitionNameToId.entrySet()) {
                     DataProperty dataProperty = partitionInfo.getDataProperty(entry.getValue());
+                    DistributionInfo partitionDistributionInfo = distributionDesc.toDistributionInfo(baseSchema);
                     Partition partition = createPartitionWithIndices(db.getClusterName(), db.getId(), olapTable.getId(),
                             olapTable.getBaseIndexId(), entry.getValue(), entry.getKey(),
-                            olapTable.getIndexIdToMeta(), distributionInfo,
+                            olapTable.getIndexIdToMeta(), partitionDistributionInfo,
                             dataProperty.getStorageMedium(),
                             partitionInfo.getReplicaAllocation(entry.getValue()),
                             versionInfo, bfColumns, bfFpp,
@@ -4064,11 +4088,11 @@ public class Catalog {
         long tableId = getNextId();
         HiveTable hiveTable = new HiveTable(tableId, tableName, columns, stmt.getProperties());
         hiveTable.setComment(stmt.getComment());
-        // check hive table if exists in hive database
+        // check hive table whether exists in hive database
         HiveMetaStoreClient hiveMetaStoreClient =
                 HiveMetaStoreClientHelper.getClient(hiveTable.getHiveProperties().get(HiveTable.HIVE_METASTORE_URIS));
         if (!HiveMetaStoreClientHelper.tableExists(hiveMetaStoreClient, hiveTable.getHiveDb(), hiveTable.getHiveTable())) {
-            throw new DdlException("Table is not exists in hive: " + hiveTable.getHiveDbTable());
+            throw new DdlException(String.format("Table [%s] dose not exist in Hive.", hiveTable.getHiveDbTable()));
         }
         // check hive table if exists in doris database
         if (!db.createTableWithLock(hiveTable, false, stmt.isSetIfNotExists()).first) {
@@ -4365,6 +4389,17 @@ public class Catalog {
             sb.append("\"table\" = \"").append(hiveTable.getHiveTable()).append("\",\n");
             sb.append(new PrintableMap<>(hiveTable.getHiveProperties(), " = ", true, true, false).toString());
             sb.append("\n)");
+        } else if (table.getType() == TableType.ICEBERG) {
+            IcebergTable icebergTable = (IcebergTable) table;
+            if (!Strings.isNullOrEmpty(table.getComment())) {
+                sb.append("\nCOMMENT \"").append(table.getComment(true)).append("\"");
+            }
+            // properties
+            sb.append("\nPROPERTIES (\n");
+            sb.append("\"iceberg.database\" = \"").append(icebergTable.getIcebergDb()).append("\",\n");
+            sb.append("\"iceberg.table\" = \"").append(icebergTable.getIcebergTbl()).append("\",\n");
+            sb.append(new PrintableMap<>(icebergTable.getIcebergProperties(), " = ", true, true, false).toString());
+            sb.append("\n)");
         }
 
         createTableStmt.add(sb.toString());
@@ -4620,6 +4655,9 @@ public class Catalog {
             // drop all temp partitions of this table, so that there is no temp partitions in recycle bin,
             // which make things easier.
             ((OlapTable) table).dropAllTempPartitions();
+        } else if (table.getType() == TableType.ICEBERG) {
+            // drop Iceberg database table creation record
+            icebergTableCreationRecordMgr.deregisterTable(db, (IcebergTable) table);
         }
 
         db.dropTable(table.getName());
@@ -5049,6 +5087,10 @@ public class Catalog {
 
     public StreamLoadRecordMgr getStreamLoadRecordMgr() {
         return streamLoadRecordMgr;
+    }
+
+    public IcebergTableCreationRecordMgr getIcebergTableCreationRecordMgr() {
+        return icebergTableCreationRecordMgr;
     }
 
     public MasterTaskExecutor getPendingLoadTaskScheduler() {

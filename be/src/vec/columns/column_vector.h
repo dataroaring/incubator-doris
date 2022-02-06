@@ -120,10 +120,14 @@ private:
     ColumnVector(std::initializer_list<T> il) : data {il} {}
 
     void insert_res_column(const uint16_t* sel, size_t sel_size, vectorized::ColumnVector<T>* res_ptr) {
+        auto& res_data = res_ptr->data; 
+        DCHECK(res_data.empty());
+        res_data.reserve(sel_size);
+        T* t = (T*)res_data.get_end_ptr();
         for (size_t i = 0; i < sel_size; i++) {
-            T* val_ptr = &data[sel[i]];
-            res_ptr->insert_data((char*)val_ptr, 0);
+            t[i] = T(data[sel[i]]);
         }
+        res_data.set_end_ptr(t + sel_size);
     }
 
 public:
@@ -208,6 +212,35 @@ public:
 
     void insert_indices_from(const IColumn& src, const int* indices_begin, const int* indices_end) override;
 
+    void insert_elements(void* elements, size_t num) {
+        auto old_size = data.size();
+        auto new_size = old_size + num;
+        data.resize(new_size);
+        memcpy(&data[old_size], elements, sizeof(value_type) * num);
+    }
+
+    void insert_elements(const value_type& element, size_t num) {
+        auto old_size = data.size();
+        auto new_size = old_size + num;
+        data.resize(new_size);
+        if constexpr (std::is_same_v<value_type, int8_t>) {
+            memset(&data[old_size], element, sizeof(value_type) * num);
+        } else if constexpr (std::is_same_v<value_type, uint8_t>) {
+            memset(&data[old_size], element, sizeof(value_type) * num);
+        } else {
+            for (size_t i = 0; i < num; ++i) {
+                data[old_size + i] = element;
+            }
+        }
+    }
+
+    void insert_zeroed_elements(size_t num) {
+        auto old_size = data.size();
+        auto new_size = old_size + num;
+        data.resize(new_size);
+        memset(&data[old_size], 0, sizeof(value_type) * num);
+    }
+
     ColumnPtr filter(const IColumn::Filter& filt, ssize_t result_size_hint) const override;
 
     // note(wb) this method is only used in storage layer now
@@ -237,6 +270,8 @@ public:
     ColumnPtr index_impl(const PaddedPODArray<Type>& indexes, size_t limit) const;
 
     ColumnPtr replicate(const IColumn::Offsets& offsets) const override;
+
+    void replicate(const uint32_t* counts, size_t target_size, IColumn& column) const override;
 
     void get_extremes(Field& min, Field& max) const override;
 
