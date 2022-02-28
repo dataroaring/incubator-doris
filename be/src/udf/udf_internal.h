@@ -32,7 +32,8 @@ namespace doris {
 class FreePool;
 class MemPool;
 class RuntimeState;
-class ColumnPtrWrapper;
+struct ColumnPtrWrapper;
+class PFunctionContext;
 
 // This class actually implements the interface of FunctionContext. This is split to
 // hide the details from the external header.
@@ -106,6 +107,9 @@ public:
     std::string& string_result() { return _string_result; }
 
     const doris_udf::FunctionContext::TypeDesc& get_return_type() const { return _return_type; }
+
+    void serialize(PFunctionContext* pcontext) const;
+    void derialize(const PFunctionContext& pcontext);
 
 private:
     friend class doris_udf::FunctionContext;

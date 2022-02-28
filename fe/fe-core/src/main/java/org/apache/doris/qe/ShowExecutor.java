@@ -1208,10 +1208,15 @@ public class ShowExecutor {
         // if job exists
         List<RoutineLoadJob> routineLoadJobList;
         try {
+            PatternMatcher matcher = null;
+            if (showRoutineLoadStmt.getPattern() != null) {
+                matcher = PatternMatcher.createMysqlPattern(showRoutineLoadStmt.getPattern(),
+                        CaseSensibility.ROUTINE_LOAD.getCaseSensibility());
+            }
             routineLoadJobList = Catalog.getCurrentCatalog().getRoutineLoadManager()
                     .getJob(showRoutineLoadStmt.getDbFullName(),
                             showRoutineLoadStmt.getName(),
-                            showRoutineLoadStmt.isIncludeHistory());
+                            showRoutineLoadStmt.isIncludeHistory(), matcher);
         } catch (MetaNotFoundException e) {
             LOG.warn(e.getMessage(), e);
             throw new AnalysisException(e.getMessage());
@@ -1983,7 +1988,7 @@ public class ShowExecutor {
         if (showCreateRoutineLoadStmt.isIncludeHistory()) {
             List<RoutineLoadJob> routineLoadJobList = new ArrayList<>();
             try {
-                routineLoadJobList = Catalog.getCurrentCatalog().getRoutineLoadManager().getJob(dbName, labelName, true);
+                routineLoadJobList = Catalog.getCurrentCatalog().getRoutineLoadManager().getJob(dbName, labelName, true, null);
             } catch (MetaNotFoundException e) {
                 LOG.warn(new LogBuilder(LogKey.ROUTINE_LOAD_JOB, labelName)
                         .add("error_msg", "Routine load cannot be found by this name")
@@ -2064,7 +2069,8 @@ public class ShowExecutor {
         String dbName = showStmt.getDbName();
         Database db = ctx.getCatalog().getDbOrAnalysisException(dbName);
 
-        List<IcebergTableCreationRecord> records = ctx.getCatalog().getIcebergTableCreationRecordMgr().getTableCreationRecordByDb(dbName);
+        List<IcebergTableCreationRecord> records =
+                ctx.getCatalog().getIcebergTableCreationRecordMgr().getTableCreationRecordByDbId(db.getId());
 
         List<List<Comparable>> rowSet = Lists.newArrayList();
         for (IcebergTableCreationRecord record : records) {
@@ -2075,9 +2081,9 @@ public class ShowExecutor {
             }
         }
 
-        // sort function rows by first column asc
+        // sort function rows by fourth column (Create Time) asc
         ListComparator<List<Comparable>> comparator = null;
-        OrderByPair orderByPair = new OrderByPair(0, false);
+        OrderByPair orderByPair = new OrderByPair(3, false);
         comparator = new ListComparator<>(orderByPair);
         Collections.sort(rowSet, comparator);
         List<List<String>> resultRowSet = Lists.newArrayList();

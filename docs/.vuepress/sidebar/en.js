@@ -255,7 +255,8 @@ module.exports = [
         directoryPath: "udf/",
         children: [
           "contribute-udf",
-          "user-defined-function",
+          "native-user-defined-function",
+          "remote-user-defined-function",
         ],
       },
     ],
@@ -345,10 +346,6 @@ module.exports = [
               "concat_ws",
               "ends_with",
               "find_in_set",
-              "get_json_double",
-              "get_json_int",
-              "get_json_string",
-              "group_concat",
               "hex",
               "instr",
               "lcase",
@@ -396,6 +393,7 @@ module.exports = [
             directoryPath: "aggregate-functions/",
             children: [
               "approx_count_distinct",
+              "group_concat",
               "avg",
               "bitmap_union",
               "count",
@@ -456,6 +454,18 @@ module.exports = [
             ],
           },
           {
+            title: "json function",
+            directoryPath: "json-functions/",
+            children: [
+              "get_json_double",
+              "get_json_int",
+              "get_json_string",
+              "json_array",
+              "json_object",
+              "json_quote",
+            ],
+          },
+          {
             title: "Encryption and Digest Functions",
             directoryPath: "encrypt-digest-functions/",
             children: [
@@ -475,7 +485,10 @@ module.exports = [
           {
             title: "Math Functions",
             directoryPath: "math-functions/",
-            children: ["conv"],
+            children: [
+              "conv",
+              "pmod"
+            ],
           },
           {
             title: "table functions",
@@ -579,6 +592,8 @@ module.exports = [
               "DROP VIEW",
               "HLL",
               "RECOVER",
+              "REFRESH DATABASE",
+              "REFRESH TABLE",
               "RESTORE",
               "SHOW ENCRYPTKEYS",
               "TRUNCATE TABLE",
@@ -709,17 +724,31 @@ module.exports = [
     title: "Apache Community",
     directoryPath: "community/",
     children: [
-      "members",
+      "team",
       "gitter",
       "subscribe-mail-list",
       "feedback",
-      "how-to-contribute",
-      "how-to-deploy-to-maven",
-      "committer-guide",
-      "commit-format-specification",
-      "pull-request",
-      "release-process",
-      "verify-apache-release",
+      {
+          title: "How to Contribute",
+          directoryPath: "how-to-contribute/",
+          children: [
+              "how-to-contribute",
+              "committer-guide",
+              "commit-format-specification",
+              "pull-request",
+          ],
+      },
+      {
+          title: "Release Process & Verification",
+          directoryPath: "release-and-verify/",
+          children: [
+              "release-prepare",
+              "release-doris-core",
+              "release-doris-connectors",
+              "release-complete",
+              "release-verify",
+          ],
+      },
       "security",
     ],
   },

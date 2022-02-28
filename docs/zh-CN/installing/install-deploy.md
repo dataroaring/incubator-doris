@@ -115,10 +115,10 @@ Doris 各个实例直接通过网络进行通讯。以下表格展示了所有�
 | BE | be_port | 9060 | FE --> BE | BE 上 thrift server 的端口，用于接收来自 FE 的请求 |
 | BE | webserver_port | 8040 | BE <--> BE | BE 上的 http server 的端口 |
 | BE | heartbeat\_service_port | 9050 | FE --> BE | BE 上心跳服务端口（thrift），用于接收来自 FE 的心跳 |
-| BE | brpc\_port* | 8060 | FE<-->BE, BE <--> BE | BE 上的 brpc 端口，用于 BE 之间通讯 |
-| FE | http_port * | 8030 | FE <--> FE，用户 |FE 上的 http server 端口 |
+| BE | brpc\_port | 8060 | FE <--> BE, BE <--> BE | BE 上的 brpc 端口，用于 BE 之间通讯 |
+| FE | http_port  | 8030 | FE <--> FE，用户 <--> FE |FE 上的 http server 端口 |
 | FE | rpc_port | 9020 | BE --> FE, FE <--> FE | FE 上的 thrift server 端口，每个fe的配置需要保持一致|
-| FE | query_port | 9030 | 用户 | FE 上的 mysql server 端口 |
+| FE | query_port | 9030 | 用户 <--> FE | FE 上的 mysql server 端口 |
 | FE | edit\_log_port | 9010 | FE <--> FE | FE 上的 bdbje 之间通信用的端口 |
 | Broker | broker\_ipc_port | 8000 | FE --> Broker, BE --> Broker | Broker 上的 thrift server，用于接收请求 |
 
@@ -176,7 +176,7 @@ doris默认为表名大小写敏感，如有表名大小写不敏感的需求需
 
 * 启动FE
 
-    `sh bin/start_fe.sh --daemon`
+    `bin/start_fe.sh --daemon`
 
     FE进程启动进入后台执行。日志默认存放在 log/ 目录下。如启动失败，可以通过查看 log/fe.log 或者 log/fe.out 查看错误信息。
 
@@ -206,13 +206,13 @@ doris默认为表名大小写敏感，如有表名大小写不敏感的需求需
     
     示例2如下：
     
-    **注意：不论HHD磁盘目录还是SSD磁盘目录，都无需添加后缀，storage_root_path参数里指定medium即可**
+    **注意：不论HDD磁盘目录还是SSD磁盘目录，都无需添加后缀，storage_root_path参数里指定medium即可**
     
     `storage_root_path=/home/disk1/doris,medium:hdd,capacity:50;/home/disk2/doris,medium:ssd,capacity:50`
     
     **说明**
     
-    - /home/disk1/doris,medium:hdd,capacity:10，表示存储限制为10GB, HHD;
+    - /home/disk1/doris,medium:hdd,capacity:10，表示存储限制为10GB, HDD;
     - /home/disk2/doris,medium:ssd,capacity:50，表示存储限制为50GB, SSD;
 
 * BE webserver_port端口配置
@@ -235,7 +235,7 @@ doris默认为表名大小写敏感，如有表名大小写不敏感的需求需
 
 * 启动 BE
 
-    `sh bin/start_be.sh --daemon`
+    `bin/start_be.sh --daemon`
 
     BE 进程将启动并进入后台执行。日志默认存放在 be/log/ 目录下。如启动失败，可以通过查看 be/log/be.log 或者 be/log/be.out 查看错误信息。
 
@@ -255,7 +255,7 @@ Broker 以插件的形式，独立于 Doris 部署。如果需要从第三方存
 
  * 启动 Broker
 
-    `sh bin/start_broker.sh --daemon` 启动 Broker。
+    `bin/start_broker.sh --daemon` 启动 Broker。
 
 * 添加 Broker
 

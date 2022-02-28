@@ -33,10 +33,12 @@
 #include "vec/io/var_int.h"
 #include "vec/runtime/vdatetime_value.h"
 
-#define DEFAULT_MAX_STRING_SIZE (1ULL << 30)
-#define WRITE_HELPERS_MAX_INT_WIDTH 40U
-
 namespace doris::vectorized {
+
+// Define in the namespace and avoid defining global macros, 
+// because it maybe conflict with other libs
+static constexpr size_t DEFAULT_MAX_STRING_SIZE = 1073741824; // 1GB
+static constexpr auto WRITE_HELPERS_MAX_INT_WIDTH = 40U;
 
 template <typename T>
 inline T decimal_scale_multiplier(UInt32 scale);
@@ -140,37 +142,6 @@ inline void write_binary(const Type& x, BufferWritable& buf) {
     write_pod_binary(x, buf);
 }
 
-inline size_t write_binary(const std::ostringstream& buf, PColumn* pcolumn) {
-    std::string uncompressed = buf.str();
-    std::string compressed;
-    snappy::Compress(uncompressed.data(), uncompressed.size(), &compressed);
-    if (static_cast<double>(compressed.size()) / uncompressed.size() > 0.7) {
-        pcolumn->set_compressed(false);
-        pcolumn->mutable_binary()->append(uncompressed);
-    } else {
-        pcolumn->set_compressed(true);
-        pcolumn->mutable_binary()->append(compressed);
-    }
-
-    return uncompressed.size();
-}
-
-inline size_t compress_binary(PColumn* pcolumn) {
-    auto uncompressed = pcolumn->mutable_binary();
-    auto uncompressed_size = uncompressed->size();
-    std::string compressed;
-    snappy::Compress(uncompressed->data(), uncompressed_size, &compressed);
-
-    if (static_cast<double>(compressed.size()) / uncompressed_size > 0.7) {
-        pcolumn->set_compressed(false);
-    } else {
-        pcolumn->set_compressed(true);
-        pcolumn->mutable_binary()->swap(compressed);
-    }
-
-    return uncompressed_size;
-}
-
 /// Read POD-type in native format
 template <typename Type>
 inline void read_pod_binary(Type& x, BufferReadable& buf) {
@@ -249,14 +220,6 @@ inline void read_binary(Type& x, BufferReadable& buf) {
     read_pod_binary(x, buf);
 }
 
-inline void read_binary(const PColumn& pcolumn, std::string* data) {
-    if (pcolumn.compressed()) {
-        snappy::Uncompress(pcolumn.binary().data(), pcolumn.binary().size(), data);
-    } else {
-        *data = pcolumn.binary();
-    }
-}
-
 template <typename T>
 bool read_float_text_fast_impl(T& x, ReadBuffer& in) {
     static_assert(std::is_same_v<T, double> || std::is_same_v<T, float>,
@@ -295,6 +258,7 @@ bool read_datetime_text_impl(T& x, ReadBuffer& buf) {
     static_assert(std::is_same_v<Int64, T>);
     auto dv = binary_cast<Int64, VecDateTimeValue>(x);
     auto ans = dv.from_date_str(buf.position(), buf.count());
+    dv.to_datetime();
 
     // only to match the is_all_read() check to prevent return null
     buf.position() = buf.end();

@@ -104,13 +104,14 @@ under the License.
         <module>fe-common</module>
         <module>spark-dpp</module>
         <module>fe-core</module>
+        <module>hive-udf</module>
     </modules>
     <properties>
         <doris.home>${basedir}/../</doris.home>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
-        <grpc.version>1.30.0</grpc.version>
+        <grpc.version>1.44.1</grpc.version>
         <protobuf.version>3.14.0</protobuf.version>
         <skip.plugin>false</skip.plugin>
         <hive.version>2.3.7</hive.version>
@@ -119,7 +120,12 @@ under the License.
         <log4j2.version>2.17.1</log4j2.version>
         <revision>0.15-SNAPSHOT</revision>
         <project.scm.id>github</project.scm.id>
+        <!-- ATTN: avro version must be consistent with Iceberg version -->
+        <!-- Please modify iceberg.version and avro.version together,
+         you can find avro version info in iceberg mvn repository -->
         <iceberg.version>0.12.0</iceberg.version>
+        <avro.version>1.10.1</avro.version>
+        <!-- ATTN: avro version must be consistent with Iceberg version -->
     </properties>
     <profiles>
         <!-- for custom internal repository -->
@@ -703,6 +709,13 @@ under the License.
                 <groupId>org.apache.iceberg</groupId>
                 <artifactId>iceberg-hive-metastore</artifactId>
                 <version>${iceberg.version}</version>
+            </dependency>
+
+            <!-- For Iceberg, must be consistent with Iceberg version -->
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
             </dependency>
 
             <dependency>

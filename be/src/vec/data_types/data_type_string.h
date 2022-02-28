@@ -35,8 +35,10 @@ public:
     const char* get_family_name() const override { return "String"; }
 
     TypeIndex get_type_id() const override { return TypeIndex::String; }
-    size_t serialize(const IColumn& column, PColumn* pcolumn) const override;
-    void deserialize(const PColumn& pcolumn, IColumn* column) const override;
+
+    int64_t get_uncompressed_serialized_bytes(const IColumn& column) const override;
+    char* serialize(const IColumn& column, char* buf) const override;
+    const char* deserialize(const char* buf, IColumn* column) const override;
 
     MutableColumnPtr create_column() const override;
 
@@ -54,8 +56,8 @@ public:
     bool is_categorial() const override { return true; }
     bool can_be_inside_nullable() const override { return true; }
     bool can_be_inside_low_cardinality() const override { return true; }
-    std::string to_string(const IColumn& column, size_t row_num) const;
-    void to_string(const IColumn &column, size_t row_num, BufferWritable &ostr) const override;
+    std::string to_string(const IColumn& column, size_t row_num) const override;
+    void to_string(const IColumn& column, size_t row_num, BufferWritable& ostr) const override;
 };
 
 } // namespace doris::vectorized

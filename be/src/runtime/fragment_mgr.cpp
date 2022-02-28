@@ -511,7 +511,7 @@ Status FragmentMgr::exec_plan_fragment(const TExecPlanFragmentParams& params) {
         RETURN_IF_ERROR(_exec_env->load_stream_mgr()->put(stream_load_cxt->id, pipe));
 
         RETURN_IF_ERROR(
-                _exec_env->stream_load_executor()->execute_plan_fragment(stream_load_cxt, pipe));
+                _exec_env->stream_load_executor()->execute_plan_fragment(stream_load_cxt));
         set_pipe(params.params.fragment_instance_id, pipe);
         return Status::OK();
     } else {
@@ -790,7 +790,8 @@ Status FragmentMgr::exec_external_plan_fragment(const TScanOpenParams& params,
             TTabletVersionInfo info = iter->second;
             scan_range.tablet_id = tablet_id;
             scan_range.version = std::to_string(info.version);
-            scan_range.version_hash = std::to_string(info.version_hash);
+            // Useless but it is required field in TPaloScanRange
+            scan_range.version_hash = "0";
             scan_range.schema_hash = std::to_string(info.schema_hash);
             scan_range.hosts.push_back(address);
         } else {

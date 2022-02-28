@@ -30,7 +30,7 @@
 #include "runtime/routine_load/routine_load_task_executor.h"
 #include "runtime/runtime_state.h"
 #include "service/brpc.h"
-#include "util/brpc_stub_cache.h"
+#include "util/brpc_client_cache.h"
 #include "util/md5.h"
 #include "util/proto_util.h"
 #include "util/string_util.h"
@@ -435,8 +435,20 @@ void PInternalServiceImpl<T>::transmit_block(google::protobuf::RpcController* cn
                                              google::protobuf::Closure* done) {
     VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
              << " node=" << request->node_id();
-    _exec_env->vstream_mgr()->transmit_block(request, &done);
+    brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
+    attachment_transfer_request_block<PTransmitDataParams>(request, cntl);
+    // The response is accessed when done->Run is called in transmit_block(),
+    // give response a default value to avoid null pointers in high concurrency.
+    Status st;
+    st.to_protobuf(response->mutable_status());
+    st = _exec_env->vstream_mgr()->transmit_block(request, &done);
+    if (!st.ok()) {
+        LOG(WARNING) << "transmit_block failed, message=" << st.get_error_msg()
+                     << ", fragment_instance_id=" << print_id(request->finst_id())
+                     << ", node=" << request->node_id();
+    }
     if (done != nullptr) {
+        st.to_protobuf(response->mutable_status());
         done->Run();
     }
 }
@@ -476,21 +488,21 @@ void PInternalServiceImpl<T>::reset_rpc_channel(google::protobuf::RpcController*
     brpc::ClosureGuard closure_guard(done);
     response->mutable_status()->set_status_code(0);
     if (request->all()) {
-        int size = ExecEnv::GetInstance()->brpc_stub_cache()->size();
+        int size = ExecEnv::GetInstance()->brpc_internal_client_cache()->size();
         if (size > 0) {
             std::vector<std::string> endpoints;
-            ExecEnv::GetInstance()->brpc_stub_cache()->get_all(&endpoints);
-            ExecEnv::GetInstance()->brpc_stub_cache()->clear();
+            ExecEnv::GetInstance()->brpc_internal_client_cache()->get_all(&endpoints);
+            ExecEnv::GetInstance()->brpc_internal_client_cache()->clear();
             *response->mutable_channels() = {endpoints.begin(), endpoints.end()};
         }
     } else {
         for (const std::string& endpoint : request->endpoints()) {
-            if (!ExecEnv::GetInstance()->brpc_stub_cache()->exist(endpoint)) {
+            if (!ExecEnv::GetInstance()->brpc_internal_client_cache()->exist(endpoint)) {
                 response->mutable_status()->add_error_msgs(endpoint + ": not found.");
                 continue;
             }
 
-            if (ExecEnv::GetInstance()->brpc_stub_cache()->erase(endpoint)) {
+            if (ExecEnv::GetInstance()->brpc_internal_client_cache()->erase(endpoint)) {
                 response->add_channels(endpoint);
             } else {
                 response->mutable_status()->add_error_msgs(endpoint + ": reset failed.");

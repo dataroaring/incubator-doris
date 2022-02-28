@@ -25,7 +25,7 @@
 #include "runtime/descriptors.h"
 #include "service/backend_options.h"
 #include "service/brpc.h"
-#include "util/brpc_stub_cache.h"
+#include "util/brpc_client_cache.h"
 #include "util/network_util.h"
 #include "util/ref_count_closure.h"
 #include "util/uid_util.h"
@@ -70,6 +70,9 @@ public:
     Status serialize_block(Block* src, PBlock* dest, int num_receivers = 1);
 
 private:
+    void _roll_pb_block();
+
+private:
     class Channel;
 
     Status get_partition_column_result(Block* block, int* result) const {
@@ -81,7 +84,8 @@ private:
     }
 
     template <typename Channels, typename HashVals>
-    Status channel_add_rows(Channels& channels, int num_channels, const HashVals& hash_vals, int rows, Block* block);
+    Status channel_add_rows(Channels& channels, int num_channels, const HashVals& hash_vals,
+                            int rows, Block* block);
 
     struct hash_128 {
         uint64_t high;
@@ -108,7 +112,7 @@ private:
     // one while the other one is still being sent
     PBlock _pb_block1;
     PBlock _pb_block2;
-    PBlock* _current_pb_block = nullptr;
+    PBlock* _cur_pb_block = nullptr;
 
     // compute per-row partition values
     std::vector<VExprContext*> _partition_expr_ctxs;
@@ -134,6 +138,11 @@ private:
     RuntimeProfile::Counter* _local_bytes_send_counter;
     // Identifier of the destination plan node.
     PlanNodeId _dest_node_id;
+
+    // This buffer is used to store the serialized block data
+    // The data in the buffer is copied to the attachment of the brpc when it is sent,
+    // to avoid an extra pb serialization in the brpc.
+    std::string _column_values_buffer;
 };
 
 // TODO: support local exechange
@@ -158,14 +167,16 @@ public:
               _need_close(false),
               _brpc_dest_addr(brpc_dest),
               _is_transfer_chain(is_transfer_chain),
-              _send_query_statistics_with_every_batch(send_query_statistics_with_every_batch) {
-                    std::string localhost = BackendOptions::get_localhost();
-                    _is_local = (_brpc_dest_addr.hostname == localhost) && (_brpc_dest_addr.port == config::brpc_port);
-                    if (_is_local) {
-                        LOG(INFO) << "will use local Exchange, dest_node_id is : "<<_dest_node_id;
-                    }
-                }
-    
+              _send_query_statistics_with_every_batch(send_query_statistics_with_every_batch),
+              _ch_cur_pb_block(&_ch_pb_block1) {
+        std::string localhost = BackendOptions::get_localhost();
+        _is_local = (_brpc_dest_addr.hostname == localhost) &&
+                    (_brpc_dest_addr.port == config::brpc_port);
+        if (_is_local) {
+            LOG(INFO) << "will use local Exchange, dest_node_id is : " << _dest_node_id;
+        }
+    }
+
     virtual ~Channel() {
         if (_closure != nullptr && _closure->unref()) {
             delete _closure;
@@ -208,7 +219,7 @@ public:
 
     int64_t num_data_bytes_sent() const { return _num_data_bytes_sent; }
 
-    PBlock* pb_block() { return &_pb_block; }
+    PBlock* ch_cur_pb_block() { return _ch_cur_pb_block; }
 
     std::string get_fragment_instance_id_str() {
         UniqueId uid(_fragment_instance_id);
@@ -218,6 +229,8 @@ public:
     TUniqueId get_fragment_instance_id() const { return _fragment_instance_id; }
 
     bool is_local() const { return _is_local; }
+
+    void ch_roll_pb_block();
 
 private:
     inline Status _wait_last_brpc() {
@@ -234,7 +247,6 @@ private:
         }
         return Status::OK();
     }
-
 
 private:
     // Serialize _batch into _thrift_batch and send via send_batch().
@@ -273,10 +285,19 @@ private:
 
     size_t _capacity;
     bool _is_local;
+
+    // serialized blocks for broadcasting; we need two so we can write
+    // one while the other one is still being sent.
+    // Which is for same reason as `_cur_pb_block`, `_pb_block1` and `_pb_block2`
+    // in VDataStreamSender.
+    PBlock* _ch_cur_pb_block = nullptr;
+    PBlock _ch_pb_block1;
+    PBlock _ch_pb_block2;
 };
 
 template <typename Channels, typename HashVals>
-Status VDataStreamSender::channel_add_rows(Channels& channels, int num_channels, const HashVals& hash_vals, int rows, Block* block) {
+Status VDataStreamSender::channel_add_rows(Channels& channels, int num_channels,
+                                           const HashVals& hash_vals, int rows, Block* block) {
     std::vector<int> channel2rows[num_channels];
 
     for (int i = 0; i < rows; i++) {

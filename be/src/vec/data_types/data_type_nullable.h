@@ -36,8 +36,12 @@ public:
     const char* get_family_name() const override { return "Nullable"; }
     TypeIndex get_type_id() const override { return TypeIndex::Nullable; }
 
-    size_t serialize(const IColumn& column, PColumn* pcolumn) const override;
-    void deserialize(const PColumn& pcolumn, IColumn* column) const override;
+    int64_t get_uncompressed_serialized_bytes(const IColumn& column) const override;
+    char* serialize(const IColumn& column, char* buf) const override;
+    const char* deserialize(const char* buf, IColumn* column) const override;
+
+    void to_pb_column_meta(PColumnMeta* col_meta) const override;
+
     MutableColumnPtr create_column() const override;
 
     Field get_default() const override;
@@ -76,7 +80,7 @@ public:
     bool can_be_inside_low_cardinality() const override {
         return nested_data_type->can_be_inside_low_cardinality();
     }
-    std::string to_string(const IColumn& column, size_t row_num) const;
+    std::string to_string(const IColumn& column, size_t row_num) const override;
 
     const DataTypePtr& get_nested_type() const { return nested_data_type; }
 
