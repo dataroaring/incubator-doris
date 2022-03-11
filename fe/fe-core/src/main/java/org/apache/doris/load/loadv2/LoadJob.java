@@ -28,7 +28,6 @@ import org.apache.doris.common.DuplicatedRequestException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.MetaNotFoundException;
@@ -60,9 +59,6 @@ import org.apache.doris.transaction.ErrorTabletInfo;
 import org.apache.doris.transaction.TransactionException;
 import org.apache.doris.transaction.TransactionState;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import com.google.common.base.Joiner;
 import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Lists;
@@ -72,6 +68,9 @@ import com.google.common.collect.Table;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -476,31 +475,43 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
      *
      * @param jobState
      */
-    public void updateState(JobState jobState) {
+    public boolean updateState(JobState jobState) {
         writeLock();
         try {
-            unprotectedUpdateState(jobState);
+            return unprotectedUpdateState(jobState);
         } finally {
             writeUnlock();
         }
     }
 
-    protected void unprotectedUpdateState(JobState jobState) {
+    protected boolean unprotectedUpdateState(JobState jobState) {
+        if (this.state.isFinalState()) {
+            // This is a simple self-protection mechanism to prevent jobs
+            // that have entered the final state from being placed in a non-terminating state again.
+            // For example, when a LoadLoadingTask starts running, it tries to set the job state to LOADING,
+            // but the job may have been cancelled (CANCELLED) due to a timeout.
+            // At this point, the job state should not be set to LOADING again.
+            // It is safe to return directly here without any processing,
+            // and other processes will ensure that the job ends properly.
+            LOG.warn("the load job {} is in final state: {}, should not update state to {} again",
+                    id, this.state, jobState);
+            return false;
+        }
         switch (jobState) {
             case UNKNOWN:
                 executeUnknown();
-                break;
+                return true;
             case LOADING:
                 executeLoad();
-                break;
+                return true;
             case COMMITTED:
                 executeCommitted();
-                break;
+                return true;
             case FINISHED:
                 executeFinish();
-                break;
+                return true;
             default:
-                break;
+                return false;
         }
     }
 
@@ -1031,10 +1042,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
     }
 
     public void readFields(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_94) {
-            readFieldOld(in);
-            return;
-        }
 
         if (!isJobTypeRead) {
             jobType = EtlJobType.valueOf(Text.readString(in));
@@ -1074,59 +1081,6 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         } catch (Exception e) {
             // should not happen
             throw new IOException("failed to replay job property", e);
-        }
-    }
-
-    // This method is to read the old meta, which the job properties are persist one by one.
-    // The new meta will save the job properties into jobProperties map
-    @Deprecated
-    private void readFieldOld(DataInput in) throws IOException {
-        if (!isJobTypeRead) {
-            jobType = EtlJobType.valueOf(Text.readString(in));
-            isJobTypeRead = true;
-        }
-
-        id = in.readLong();
-        dbId = in.readLong();
-        label = Text.readString(in);
-        state = JobState.valueOf(Text.readString(in));
-        long timeoutSecond;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_54) {
-            timeoutSecond = in.readLong();
-        } else {
-            timeoutSecond = in.readInt();
-        }
-        long execMemLimit = in.readLong();
-        double maxFilterRatio = in.readDouble();
-        // delete flag is never used
-        boolean deleteFlag = in.readBoolean();
-        jobProperties.put(LoadStmt.TIMEOUT_PROPERTY, timeoutSecond);
-        jobProperties.put(LoadStmt.EXEC_MEM_LIMIT, execMemLimit);
-        jobProperties.put(LoadStmt.MAX_FILTER_RATIO_PROPERTY, maxFilterRatio);
-
-        createTimestamp = in.readLong();
-        loadStartTimestamp = in.readLong();
-        finishTimestamp = in.readLong();
-        if (in.readBoolean()) {
-            failMsg = new FailMsg();
-            failMsg.readFields(in);
-        }
-        progress = in.readInt();
-        loadingStatus.readFields(in);
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_54) {
-            boolean strictMode = in.readBoolean();
-            jobProperties.put(LoadStmt.STRICT_MODE, strictMode);
-            transactionId = in.readLong();
-        }
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_56) {
-            if (in.readBoolean()) {
-                authorizationInfo = new AuthorizationInfo();
-                authorizationInfo.readFields(in);
-            }
-        }
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_61) {
-            String timezone = Text.readString(in);
-            jobProperties.put(LoadStmt.TIMEZONE, timezone);
         }
     }
 

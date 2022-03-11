@@ -432,21 +432,6 @@ public class QueryPlanTest {
                 "PROPERTIES (\n" +
                 "\"replication_num\" = \"1\"" +
                 ");");
-
-        createTable("CREATE TABLE test.result_exprs (\n" +
-                "  `aid` int(11) NULL,\n" +
-                "  `bid` int(11) NULL\n" +
-                ") ENGINE=OLAP\n" +
-                "DUPLICATE KEY(`aid`)\n" +
-                "COMMENT \"OLAP\"\n" +
-                "DISTRIBUTED BY HASH(`aid`) BUCKETS 7\n" +
-                "PROPERTIES (\n" +
-                "\"replication_num\" = \"1\",\n" +
-                "\"in_memory\" = \"false\",\n" +
-                "\"business_key_column_name\" = \"\",\n" +
-                "\"storage_medium\" = \"HDD\",\n" +
-                "\"storage_format\" = \"V2\"\n" +
-                ");\n");
     }
 
     @AfterClass
@@ -1673,35 +1658,57 @@ public class QueryPlanTest {
         String sql = "select * from test1 where from_unixtime(query_time) > '2021-03-02 10:01:28'";
         String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614650488"));
-        //format yyyy-MM-dd HH:mm:ss
+
+        //format yyyy-MM-dd HH:mm:ss or %Y-%m-%d %H:%i:%s
         sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd HH:mm:ss') > '2021-03-02 10:01:28'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614650488"));
-        //format yyyy-MM-dd HH:mm
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd HH:mm') > '2021-03-02 10:01:28'";
+        sql = "select * from test1 where from_unixtime(query_time, '%Y-%m-%d %H:%i:%s') > '2021-03-02 10:01:28'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614650460"));
-        //format yyyy-MM-dd HH
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd HH') > '2021-03-02 10:01:28'";
-        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614650400"));
-        //format yyyy-MM-dd
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd') > '2021-03-02 10:01:28'";
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614650488"));
+
+        //format yyyy-MM-dd or %Y-%m-%d
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd') > '2021-03-02'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614614400"));
-        //format yyyy-MM
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM') > '2021-03-02 10:01:28'";
+        sql = "select * from test1 where from_unixtime(query_time, '%Y-%m-%d') > '2021-03-02'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614528000"));
-        //format yyyy
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy') > '2021-03-02 10:01:28'";
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614614400"));
+
+        // format yyyyMMdd or %Y%m%d
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyyMMdd') > '20210302'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1609430400"));
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614614400"));
+        sql = "select * from test1 where from_unixtime(query_time, '%Y%m%d') > '20210302'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` <= 253402271999, `query_time` > 1614614400"));
 
         //format less than
-        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd') < '2021-03-02 10:01:28'";
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd') < '2021-03-02'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         Assert.assertTrue(explainString.contains("PREDICATES: `query_time` < 1614614400, `query_time` >= 0"));
+
+        // Do not support other format
+        //format yyyy-MM-dd HH:mm
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd HH:mm') > '2021-03-02 10:01'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertFalse(explainString.contains("PREDICATES: `query_time` <= 253402271999"));
+        //format yyyy-MM-dd HH
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd HH') > '2021-03-02 10'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertFalse(explainString.contains("PREDICATES: `query_time` <= 253402271999"));
+        //format yyyy-MM
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM') > '2021-03'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertFalse(explainString.contains("PREDICATES: `query_time` <= 253402271999"));
+        //format yyyy
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyy') > '2021'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertFalse(explainString.contains("PREDICATES: `query_time` <= 253402271999"));
+        // parse error
+        sql = "select * from test1 where from_unixtime(query_time, 'yyyyMMdd') > '2021-03-02 10:01:28'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertFalse(explainString.contains("PREDICATES: `query_time` <= 253402271999"));
     }
 
     @Test
@@ -2017,24 +2024,41 @@ public class QueryPlanTest {
                 "\"in_memory\" = \"false\",\n" +
                 "\"storage_format\" = \"V2\"\n" +
                 ")");
+        createTable("CREATE TABLE issue7971.`t1` (\n" +
+                "  `k1` tinyint(4) NULL COMMENT \"\",\n" +
+                "  `k21` smallint(6) NULL COMMENT \"\",\n" +
+                "  `k31` smallint(6) NULL COMMENT \"\"\n" +
+                ") ENGINE=OLAP\n" +
+                "DUPLICATE KEY(`k1`)\n" +
+                "COMMENT \"OLAP\"\n" +
+                "DISTRIBUTED BY HASH(`k1`) BUCKETS 1\n" +
+                "PROPERTIES (\n" +
+                "\"replication_allocation\" = \"tag.location.default: 1\",\n" +
+                "\"in_memory\" = \"false\",\n" +
+                "\"storage_format\" = \"V2\"\n" +
+                ")");
         String sql = "SELECT k1, k2, GROUPING(k1), GROUPING(k2), SUM(k3) FROM issue7971.t GROUP BY GROUPING SETS ( (k1, k2), (k2), (k1), ( ) );";
         String explainStr = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, sql);
         Assert.assertTrue(explainStr.contains("REPEAT_NODE"));
         sql = "SELECT k1 ,GROUPING(k2) FROM issue7971.t GROUP BY CUBE (k1) ORDER BY k1;";
         explainStr = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, sql);
         Assert.assertTrue(explainStr.contains("errCode = 2"));
+        sql = "select grouping_id(t1.k1), t1.k1, max(k2) from issue7971.t left join issue7971.t1 on t.k3 = t1.k1 group by grouping sets ((k1), ());";
+        explainStr = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, sql);
+        Assert.assertTrue(explainStr.contains("REPEAT_NODE"));
     }
 
     @Test
     public void testQueryWithUsingClause() throws Exception {
         connectContext.setDatabase("default_cluster:test");
-        String iSql1 = "insert into test.tbl_using_a values(1,3,7),(2,2,8),(3,1,9)";
-        String iSql2 = "insert into test.tbl_using_b values(1,3,1),(3,1,1),(4,1,1),(5,2,1)";
-        UtFrameUtils.getSqlStmtExecutor(connectContext, iSql1);
-        UtFrameUtils.getSqlStmtExecutor(connectContext, iSql2);
-        String qSQL = "select t1.* from test.tbl_using_a t1 join test.tbl_using_b t2 using(k1,k2) where t1.k1 between 1 and 3 and t2.k3 between 1+0 and 3+0";
+        String iSql1 = "explain insert into test.tbl_using_a values(1,3,7),(2,2,8),(3,1,9)";
+        String iSql2 = "explain insert into test.tbl_using_b values(1,3,1),(3,1,1),(4,1,1),(5,2,1)";
+        UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, iSql1);
+        UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, iSql2);
+        String qSQL = "explain  select t1.* from test.tbl_using_a t1 join test.tbl_using_b t2 using(k1,k2) where t1.k1 " +
+                "between 1 and 3 and t2.k3 between 1+0 and 3+0";
         try {
-            UtFrameUtils.getSqlStmtExecutor(connectContext, qSQL);
+            UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, qSQL);
         } catch (AnalysisException e) {
             Assert.fail();
         }
@@ -2043,6 +2067,20 @@ public class QueryPlanTest {
     @Test
     public void testResultExprs() throws Exception {
         connectContext.setDatabase("default_cluster:test");
+        createTable("CREATE TABLE test.result_exprs (\n" +
+                "  `aid` int(11) NULL,\n" +
+                "  `bid` int(11) NULL\n" +
+                ") ENGINE=OLAP\n" +
+                "DUPLICATE KEY(`aid`)\n" +
+                "COMMENT \"OLAP\"\n" +
+                "DISTRIBUTED BY HASH(`aid`) BUCKETS 7\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\",\n" +
+                "\"in_memory\" = \"false\",\n" +
+                "\"business_key_column_name\" = \"\",\n" +
+                "\"storage_medium\" = \"HDD\",\n" +
+                "\"storage_format\" = \"V2\"\n" +
+                ");\n");
         String queryStr = "EXPLAIN INSERT INTO result_exprs\n" +
                 "SELECT a.aid,\n" +
                 "       b.bid\n" +
@@ -2053,5 +2091,25 @@ public class QueryPlanTest {
         String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, queryStr);
         Assert.assertFalse(explainString.contains("OUTPUT EXPRS:3 | 4"));
         Assert.assertTrue(explainString.contains("OUTPUT EXPRS:CAST(`a`.`aid` AS INT) | 4"));
+    }
+
+    @Test
+    public void testInsertIntoSelect() throws Exception {
+        connectContext.setDatabase("default_cluster:test");
+        createTable("CREATE TABLE test.`decimal_tb` (\n" +
+                "  `k1` decimal(1, 0) NULL COMMENT \"\",\n" +
+                "  `v1` decimal(1, 0) SUM NULL COMMENT \"\",\n" +
+                "  `v2` decimal(1, 0) MAX NULL COMMENT \"\",\n" +
+                "  `v3` decimal(1, 0) MIN NULL COMMENT \"\",\n" +
+                "  `v4` decimal(1, 0) REPLACE NULL COMMENT \"\"\n" +
+                ") ENGINE=OLAP\n" +
+                "AGGREGATE KEY(`k1`)\n" +
+                "DISTRIBUTED BY HASH(`k1`) BUCKETS 1\n" +
+                "PROPERTIES (\n" +
+                "\"replication_allocation\" = \"tag.location.default: 1\"\n" +
+                ")");
+        String sql = "explain insert into test.decimal_tb select 1, 10, 1, 1, 1;";
+        String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, sql);
+        Assert.assertTrue(explainString.contains("1 | 10 | 1 | 1 | 1"));
     }
 }

@@ -21,10 +21,8 @@ import org.apache.doris.catalog.DistributionInfo.DistributionInfoType;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.MaterializedIndex.IndexState;
 import org.apache.doris.common.FeConstants;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
-import org.apache.doris.meta.MetaContext;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -54,7 +52,8 @@ public class Partition extends MetaObject implements Writable {
         @Deprecated
         ROLLUP,
         @Deprecated
-        SCHEMA_CHANGE
+        SCHEMA_CHANGE,
+        RESTORE
     }
 
     @SerializedName(value = "id")
@@ -160,13 +159,6 @@ public class Partition extends MetaObject implements Writable {
 
     public void updateVisibleVersionAndTime(long visibleVersion, long visibleVersionTime) {
         this.setVisibleVersionAndTime(visibleVersion, visibleVersionTime);
-        if (MetaContext.get() != null) {
-            // MetaContext is not null means we are in a edit log replay thread.
-            // if it is upgrade from old palo cluster, then should update next version info
-            if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_45) {
-                throw new RuntimeException("FeMetaVersion = " + Catalog.getCurrentCatalogJournalVersion() + " is too low, should not happen");
-            }
-        }
     }
     
     public long getVisibleVersion() {
@@ -360,28 +352,18 @@ public class Partition extends MetaObject implements Writable {
             idToVisibleRollupIndex.put(rollupTable.getId(), rollupTable);
         }
         
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_61) {
-            int shadowIndexCount = in.readInt();
-            for (int i = 0; i < shadowIndexCount; i++) {
-                MaterializedIndex shadowIndex = MaterializedIndex.read(in);
-                idToShadowIndex.put(shadowIndex.getId(), shadowIndex);
-            }
+        int shadowIndexCount = in.readInt();
+        for (int i = 0; i < shadowIndexCount; i++) {
+            MaterializedIndex shadowIndex = MaterializedIndex.read(in);
+            idToShadowIndex.put(shadowIndex.getId(), shadowIndex);
         }
 
         visibleVersion = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_88) {
-            visibleVersionTime = in.readLong();
-        } else {
-            visibleVersionTime = System.currentTimeMillis();             
-        }
+        visibleVersionTime = in.readLong();
         visibleVersionHash = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_45) {
-            nextVersion = in.readLong();
-            nextVersionHash = in.readLong();
-            committedVersionHash = in.readLong();
-        } else {
-            throw new IOException("FeMetaVersion = " + Catalog.getCurrentCatalogJournalVersion() + " is too old, should not happen");
-        }
+        nextVersion = in.readLong();
+        nextVersionHash = in.readLong();
+        committedVersionHash = in.readLong();
         DistributionInfoType distriType = DistributionInfoType.valueOf(Text.readString(in));
         if (distriType == DistributionInfoType.HASH) {
             distributionInfo = HashDistributionInfo.read(in);
@@ -441,19 +423,15 @@ public class Partition extends MetaObject implements Writable {
         }
 
         buffer.append("committedVersion: ").append(visibleVersion).append("; ");
-
         buffer.append("distribution_info.type: ").append(distributionInfo.getType().name()).append("; ");
         buffer.append("distribution_info: ").append(distributionInfo.toString());
 
         return buffer.toString();
     }
 
-    public boolean convertRandomDistributionToHashDistribution(List<Column> baseSchema) {
-        boolean hasChanged = false;
-        if (distributionInfo.getType() == DistributionInfoType.RANDOM) {
-            distributionInfo = ((RandomDistributionInfo) distributionInfo).toHashDistributionInfo(baseSchema);
-            hasChanged = true;
+    public void convertHashDistributionToRandomDistribution() {
+        if (distributionInfo.getType() == DistributionInfoType.HASH) {
+            distributionInfo = ((HashDistributionInfo) distributionInfo).toRandomDistributionInfo();
         }
-        return hasChanged;
     }
 }

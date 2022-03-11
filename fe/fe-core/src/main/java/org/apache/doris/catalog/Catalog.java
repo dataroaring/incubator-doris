@@ -161,6 +161,7 @@ import org.apache.doris.journal.JournalCursor;
 import org.apache.doris.journal.JournalEntity;
 import org.apache.doris.journal.bdbje.Timestamp;
 import org.apache.doris.load.DeleteHandler;
+import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.ExportChecker;
 import org.apache.doris.load.ExportJob;
 import org.apache.doris.load.ExportMgr;
@@ -187,6 +188,7 @@ import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.persist.BackendIdsUpdateInfo;
+import org.apache.doris.persist.BackendReplicasInfo;
 import org.apache.doris.persist.BackendTabletsInfo;
 import org.apache.doris.persist.ClusterInfo;
 import org.apache.doris.persist.ColocatePersistInfo;
@@ -258,11 +260,15 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
+import com.sleepycat.je.rep.InsufficientLogException;
+import com.sleepycat.je.rep.NetworkRestore;
+import com.sleepycat.je.rep.NetworkRestoreConfig;
 
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jackson.map.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.DataInputStream;
@@ -291,12 +297,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
-
-import com.sleepycat.je.rep.InsufficientLogException;
-import com.sleepycat.je.rep.NetworkRestore;
-import com.sleepycat.je.rep.NetworkRestoreConfig;
-
-import org.codehaus.jackson.map.ObjectMapper;
 
 public class Catalog {
     private static final Logger LOG = LogManager.getLogger(Catalog.class);
@@ -746,12 +746,15 @@ public class Catalog {
     public StatisticsManager getStatisticsManager() {
         return statisticsManager;
     }
+
     public StatisticsJobManager getStatisticsJobManager() {
         return statisticsJobManager;
     }
+
     public StatisticsJobScheduler getStatisticsJobScheduler() {
         return statisticsJobScheduler;
     }
+
     public StatisticsTaskScheduler getStatisticsTaskScheduler() {
         return statisticsTaskScheduler;
     }
@@ -1648,10 +1651,6 @@ public class Catalog {
                             invertedIndex.addTablet(tabletId, tabletMeta);
                             for (Replica replica : tablet.getReplicas()) {
                                 invertedIndex.addReplica(tabletId, replica);
-                                if (MetaContext.get().getMetaVersion() < FeMetaVersion.VERSION_48) {
-                                    // set replica's schema hash
-                                    replica.setSchemaHash(schemaHash);
-                                }
                             }
                         }
                     } // end for indices
@@ -1681,9 +1680,7 @@ public class Catalog {
         newChecksum ^= catalogId;
         idGenerator.setId(catalogId);
 
-        if (journalVersion >= FeMetaVersion.VERSION_32) {
-            isDefaultClusterCreated = dis.readBoolean();
-        }
+        isDefaultClusterCreated = dis.readBoolean();
 
         LOG.info("finished replay header from image");
         return newChecksum;
@@ -1701,28 +1698,20 @@ public class Catalog {
     }
 
     public long loadFrontends(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_22) {
-            int size = dis.readInt();
-            long newChecksum = checksum ^ size;
-            for (int i = 0; i < size; i++) {
-                Frontend fe = Frontend.read(dis);
-                replayAddFrontend(fe);
-            }
+        int size = dis.readInt();
+        long newChecksum = checksum ^ size;
+        for (int i = 0; i < size; i++) {
+            Frontend fe = Frontend.read(dis);
+            replayAddFrontend(fe);
+        }
 
-            size = dis.readInt();
-            newChecksum ^= size;
-            for (int i = 0; i < size; i++) {
-                if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_41) {
-                    Frontend fe = Frontend.read(dis);
-                    removedFrontends.add(fe.getNodeName());
-                } else {
-                    removedFrontends.add(Text.readString(dis));
-                }
-            }
-            return newChecksum;
+        size = dis.readInt();
+        newChecksum ^= size;
+        for (int i = 0; i < size; i++) {
+            removedFrontends.add(Text.readString(dis));
         }
         LOG.info("finished replay frontends from image");
-        return checksum;
+        return newChecksum;
     }
 
     public long loadDb(DataInputStream dis, long checksum) throws IOException, DdlException {
@@ -1762,6 +1751,10 @@ public class Catalog {
                 // LABEL_KEEP_MAX_MS
                 // This job must be FINISHED or CANCELLED
                 if (!job.isExpired(currentTimeMs)) {
+                    if (job.getEtlJobType() != EtlJobType.HADOOP) {
+                        LOG.warn("job {} with type is deprecated, skip it", job.getId(), job.getEtlJobType());
+                        continue;
+                    }
                     load.unprotectAddLoadJob(job, true /* replay */);
                 }
             }
@@ -1769,26 +1762,20 @@ public class Catalog {
 
         // delete jobs
         // Delete job has been moved to DeleteHandler. Here the jobSize is always 0, we need do nothing.
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_11) {
-            jobSize = dis.readInt();
-            Preconditions.checkState(jobSize == 0, jobSize);
-            newChecksum ^= jobSize;
-        }
+        jobSize = dis.readInt();
+        Preconditions.checkState(jobSize == 0, jobSize);
+        newChecksum ^= jobSize;
 
         // load error hub info
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_24) {
-            LoadErrorHub.Param param = new LoadErrorHub.Param();
-            param.readFields(dis);
-            load.setLoadErrorHubInfo(param);
-        }
+        LoadErrorHub.Param param = new LoadErrorHub.Param();
+        param.readFields(dis);
+        load.setLoadErrorHubInfo(param);
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_45) {
-            // 4. load delete jobs
-            // Delete job has been moved to DeleteHandler. Here the jobSize is always 0, we need do nothing.
-            int deleteJobSize = dis.readInt();
-            Preconditions.checkState(deleteJobSize == 0, deleteJobSize);
-            newChecksum ^= deleteJobSize;
-        }
+        // 4. load delete jobs
+        // Delete job has been moved to DeleteHandler. Here the jobSize is always 0, we need do nothing.
+        int deleteJobSize = dis.readInt();
+        Preconditions.checkState(deleteJobSize == 0, deleteJobSize);
+        newChecksum ^= deleteJobSize;
 
         LOG.info("finished replay loadJob from image");
         return newChecksum;
@@ -1797,16 +1784,14 @@ public class Catalog {
     public long loadExportJob(DataInputStream dis, long checksum) throws IOException, DdlException {
         long curTime = System.currentTimeMillis();
         long newChecksum = checksum;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_32) {
-            int size = dis.readInt();
-            newChecksum = checksum ^ size;
-            for (int i = 0; i < size; ++i) {
-                long jobId = dis.readLong();
-                newChecksum ^= jobId;
-                ExportJob job = ExportJob.read(dis);
-                if (!job.isExpired(curTime)) {
-                    exportMgr.unprotectAddJob(job);
-                }
+        int size = dis.readInt();
+        newChecksum = checksum ^ size;
+        for (int i = 0; i < size; ++i) {
+            long jobId = dis.readLong();
+            newChecksum ^= jobId;
+            ExportJob job = ExportJob.read(dis);
+            if (!job.isExpired(curTime)) {
+                exportMgr.unprotectAddJob(job);
             }
         }
         LOG.info("finished replay exportJob from image");
@@ -1851,27 +1836,25 @@ public class Catalog {
         }
 
         // alter job v2
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_61) {
-            size = dis.readInt();
-            newChecksum ^= size;
-            for (int i = 0; i < size; i++) {
-                AlterJobV2 alterJobV2 = AlterJobV2.read(dis);
-                if (type == JobType.ROLLUP || type == JobType.SCHEMA_CHANGE) {
-                    if (type == JobType.ROLLUP) {
-                        this.getRollupHandler().addAlterJobV2(alterJobV2);
-                    } else {
-                        alterJobsV2.put(alterJobV2.getJobId(), alterJobV2);
-                    }
-                    // ATTN : we just want to add tablet into TabletInvertedIndex when only PendingJob is checkpointed
-                    // to prevent TabletInvertedIndex data loss,
-                    // So just use AlterJob.replay() instead of AlterHandler.replay().
-                    if (alterJobV2.getJobState() == AlterJobV2.JobState.PENDING) {
-                        alterJobV2.replay(alterJobV2);
-                        LOG.info("replay pending alter job when load alter job {} ", alterJobV2.getJobId());
-                    }
+        size = dis.readInt();
+        newChecksum ^= size;
+        for (int i = 0; i < size; i++) {
+            AlterJobV2 alterJobV2 = AlterJobV2.read(dis);
+            if (type == JobType.ROLLUP || type == JobType.SCHEMA_CHANGE) {
+                if (type == JobType.ROLLUP) {
+                    this.getRollupHandler().addAlterJobV2(alterJobV2);
                 } else {
                     alterJobsV2.put(alterJobV2.getJobId(), alterJobV2);
                 }
+                // ATTN : we just want to add tablet into TabletInvertedIndex when only PendingJob is checkpointed
+                // to prevent TabletInvertedIndex data loss,
+                // So just use AlterJob.replay() instead of AlterHandler.replay().
+                if (alterJobV2.getJobState() == AlterJobV2.JobState.PENDING) {
+                    alterJobV2.replay(alterJobV2);
+                    LOG.info("replay pending alter job when load alter job {} ", alterJobV2.getJobId());
+                }
+            } else {
+                alterJobsV2.put(alterJobV2.getJobId(), alterJobV2);
             }
         }
 
@@ -1879,54 +1862,43 @@ public class Catalog {
     }
 
     public long loadBackupHandler(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_42) {
-            getBackupHandler().readFields(dis);
-        }
+        getBackupHandler().readFields(dis);
         getBackupHandler().setCatalog(this);
         LOG.info("finished replay backupHandler from image");
         return checksum;
     }
 
     public long loadDeleteHandler(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_82) {
-            this.deleteHandler = DeleteHandler.read(dis);
-        }
+        this.deleteHandler = DeleteHandler.read(dis);
         LOG.info("finished replay deleteHandler from image");
         return checksum;
     }
 
     public long loadPaloAuth(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_43) {
-            // CAN NOT use PaloAuth.read(), cause this auth instance is already passed to DomainResolver
-            auth.readFields(dis);
-        }
+        // CAN NOT use PaloAuth.read(), cause this auth instance is already passed to DomainResolver
+        auth.readFields(dis);
         LOG.info("finished replay paloAuth from image");
         return checksum;
     }
 
     public long loadTransactionState(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_45) {
-            int size = dis.readInt();
-            long newChecksum = checksum ^ size;
-            globalTransactionMgr.readFields(dis);
-            LOG.info("finished replay transactionState from image");
-            return newChecksum;
-        }
-        return checksum;
+        int size = dis.readInt();
+        long newChecksum = checksum ^ size;
+        globalTransactionMgr.readFields(dis);
+        LOG.info("finished replay transactionState from image");
+        return newChecksum;
     }
 
     public long loadRecycleBin(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_10) {
-            recycleBin.readFields(dis);
-            if (!isCheckpointThread()) {
-                // add tablet in Recycle bin to TabletInvertedIndex
-                recycleBin.addTabletToInvertedIndex();
-            }
-            // create DatabaseTransactionMgr for db in recycle bin.
-            // these dbs do not exist in `idToDb` of the catalog.
-            for (Long dbId : recycleBin.getAllDbIds()) {
-                globalTransactionMgr.addDatabaseTransactionMgr(dbId);
-            }
+        recycleBin.readFields(dis);
+        if (!isCheckpointThread()) {
+            // add tablet in Recycle bin to TabletInvertedIndex
+            recycleBin.addTabletToInvertedIndex();
+        }
+        // create DatabaseTransactionMgr for db in recycle bin.
+        // these dbs do not exist in `idToDb` of the catalog.
+        for (Long dbId : recycleBin.getAllDbIds()) {
+            globalTransactionMgr.addDatabaseTransactionMgr(dbId);
         }
         LOG.info("finished replay recycleBin from image");
         return checksum;
@@ -1934,49 +1906,37 @@ public class Catalog {
 
     // global variable persistence
     public long loadGlobalVariable(DataInputStream in, long checksum) throws IOException, DdlException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_22) {
-            VariableMgr.read(in);
-        }
+        VariableMgr.read(in);
         LOG.info("finished replay globalVariable from image");
         return checksum;
     }
 
     public long loadColocateTableIndex(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_46) {
-            Catalog.getCurrentColocateIndex().readFields(dis);
-        }
+        Catalog.getCurrentColocateIndex().readFields(dis);
         LOG.info("finished replay colocateTableIndex from image");
         return checksum;
     }
 
     public long loadRoutineLoadJobs(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_49) {
-            Catalog.getCurrentCatalog().getRoutineLoadManager().readFields(dis);
-        }
+        Catalog.getCurrentCatalog().getRoutineLoadManager().readFields(dis);
         LOG.info("finished replay routineLoadJobs from image");
         return checksum;
     }
 
     public long loadLoadJobsV2(DataInputStream in, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_50) {
-            loadManager.readFields(in);
-        }
+        loadManager.readFields(in);
         LOG.info("finished replay loadJobsV2 from image");
         return checksum;
     }
 
     public long loadResources(DataInputStream in, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_87) {
-            resourceMgr = ResourceMgr.read(in);
-        }
+        resourceMgr = ResourceMgr.read(in);
         LOG.info("finished replay resources from image");
         return checksum;
     }
 
     public long loadSmallFiles(DataInputStream in, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_52) {
-            smallFileMgr.readFields(in);
-        }
+        smallFileMgr.readFields(in);
         LOG.info("finished replay smallFiles from image");
         return checksum;
     }
@@ -5821,33 +5781,26 @@ public class Catalog {
                 throw new DdlException("Only support change partitioned table's distribution.");
             }
 
-            DistributionInfo defaultDistributionInfo = olapTable.getDefaultDistributionInfo();
-            if (defaultDistributionInfo.getType() != DistributionInfoType.HASH) {
-                throw new DdlException("Cannot change default bucket number of distribution type " + defaultDistributionInfo.getType());
-            }
-
             DistributionDesc distributionDesc = modifyDistributionClause.getDistributionDesc();
-
-            DistributionInfo distributionInfo = null;
-
-            List<Column> baseSchema = olapTable.getBaseSchema();
-
             if (distributionDesc != null) {
-                distributionInfo = distributionDesc.toDistributionInfo(baseSchema);
+                DistributionInfo defaultDistributionInfo = olapTable.getDefaultDistributionInfo();
+                List<Column> baseSchema = olapTable.getBaseSchema();
+                DistributionInfo distributionInfo = distributionDesc.toDistributionInfo(baseSchema);
                 // for now. we only support modify distribution's bucket num
-                if (distributionInfo.getType() != DistributionInfoType.HASH) {
-                    throw new DdlException("Cannot change distribution type to " + distributionInfo.getType());
+                if (distributionInfo.getType() != defaultDistributionInfo.getType()) {
+                    throw new DdlException("Cannot change distribution type when modify default distribution bucket num");
+                }
+                if (distributionInfo.getType() == DistributionInfoType.HASH) {
+                    HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) distributionInfo;
+                    List<Column> newDistriCols = hashDistributionInfo.getDistributionColumns();
+                    List<Column> defaultDistriCols = ((HashDistributionInfo) defaultDistributionInfo).getDistributionColumns();
+                    if (!newDistriCols.equals(defaultDistriCols)) {
+                        throw new DdlException("Cannot assign hash distribution with different distribution cols. "
+                                + "default is: " + defaultDistriCols);
+                    }
                 }
 
-                HashDistributionInfo hashDistributionInfo = (HashDistributionInfo) distributionInfo;
-                List<Column> newDistriCols = hashDistributionInfo.getDistributionColumns();
-                List<Column> defaultDistriCols = ((HashDistributionInfo) defaultDistributionInfo).getDistributionColumns();
-                if (!newDistriCols.equals(defaultDistriCols)) {
-                    throw new DdlException("Cannot assign hash distribution with different distribution cols. "
-                            + "default is: " + defaultDistriCols);
-                }
-
-                int bucketNum = hashDistributionInfo.getBucketNum();
+                int bucketNum = distributionInfo.getBucketNum();
                 if (bucketNum <= 0) {
                     throw new DdlException("Cannot assign hash distribution buckets less than 1");
                 }
@@ -5863,7 +5816,7 @@ public class Catalog {
         }
     }
 
-    public void replayModifyTableDefaultDistributionBucketNum(short opCode, ModifyTableDefaultDistributionBucketNumOperationLog info) throws MetaNotFoundException {
+    public void replayModifyTableDefaultDistributionBucketNum(ModifyTableDefaultDistributionBucketNumOperationLog info) throws MetaNotFoundException {
         long dbId = info.getDbId();
         long tableId = info.getTableId();
         int bucketNum = info.getBucketNum();
@@ -6540,46 +6493,44 @@ public class Catalog {
     }
 
     public long loadCluster(DataInputStream dis, long checksum) throws IOException, DdlException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-            int clusterCount = dis.readInt();
-            checksum ^= clusterCount;
-            for (long i = 0; i < clusterCount; ++i) {
-                final Cluster cluster = Cluster.read(dis);
-                checksum ^= cluster.getId();
+        int clusterCount = dis.readInt();
+        checksum ^= clusterCount;
+        for (long i = 0; i < clusterCount; ++i) {
+            final Cluster cluster = Cluster.read(dis);
+            checksum ^= cluster.getId();
 
-                List<Long> latestBackendIds = systemInfo.getClusterBackendIds(cluster.getName());
-                if (latestBackendIds.size() != cluster.getBackendIdList().size()) {
-                    LOG.warn("Cluster:" + cluster.getName() + ", backends in Cluster is "
-                            + cluster.getBackendIdList().size() + ", backends in SystemInfoService is "
-                            + cluster.getBackendIdList().size());
-                }
-                // The number of BE in cluster is not same as in SystemInfoService, when perform 'ALTER
-                // SYSTEM ADD BACKEND TO ...' or 'ALTER SYSTEM ADD BACKEND ...', because both of them are 
-                // for adding BE to some Cluster, but loadCluster is after loadBackend.
-                cluster.setBackendIdList(latestBackendIds);
-
-                String dbName = InfoSchemaDb.getFullInfoSchemaDbName(cluster.getName());
-                InfoSchemaDb db;
-                // Use real Catalog instance to avoid InfoSchemaDb id continuously increment
-                // when checkpoint thread load image.
-                if (Catalog.getServingCatalog().getFullNameToDb().containsKey(dbName)) {
-                    db = (InfoSchemaDb) Catalog.getServingCatalog().getFullNameToDb().get(dbName);
-                } else {
-                    db = new InfoSchemaDb(cluster.getName());
-                    db.setClusterName(cluster.getName());
-                }
-                String errMsg = "InfoSchemaDb id shouldn't larger than 10000, please restart your FE server";
-                // Every time we construct the InfoSchemaDb, which id will increment.
-                // When InfoSchemaDb id larger than 10000 and put it to idToDb,
-                // which may be overwrite the normal db meta in idToDb,
-                // so we ensure InfoSchemaDb id less than 10000.
-                Preconditions.checkState(db.getId() < NEXT_ID_INIT_VALUE, errMsg);
-                idToDb.put(db.getId(), db);
-                fullNameToDb.put(db.getFullName(), db);
-                cluster.addDb(dbName, db.getId());
-                idToCluster.put(cluster.getId(), cluster);
-                nameToCluster.put(cluster.getName(), cluster);
+            List<Long> latestBackendIds = systemInfo.getClusterBackendIds(cluster.getName());
+            if (latestBackendIds.size() != cluster.getBackendIdList().size()) {
+                LOG.warn("Cluster:" + cluster.getName() + ", backends in Cluster is "
+                        + cluster.getBackendIdList().size() + ", backends in SystemInfoService is "
+                        + cluster.getBackendIdList().size());
             }
+            // The number of BE in cluster is not same as in SystemInfoService, when perform 'ALTER
+            // SYSTEM ADD BACKEND TO ...' or 'ALTER SYSTEM ADD BACKEND ...', because both of them are 
+            // for adding BE to some Cluster, but loadCluster is after loadBackend.
+            cluster.setBackendIdList(latestBackendIds);
+
+            String dbName = InfoSchemaDb.getFullInfoSchemaDbName(cluster.getName());
+            InfoSchemaDb db;
+            // Use real Catalog instance to avoid InfoSchemaDb id continuously increment
+            // when checkpoint thread load image.
+            if (Catalog.getServingCatalog().getFullNameToDb().containsKey(dbName)) {
+                db = (InfoSchemaDb) Catalog.getServingCatalog().getFullNameToDb().get(dbName);
+            } else {
+                db = new InfoSchemaDb(cluster.getName());
+                db.setClusterName(cluster.getName());
+            }
+            String errMsg = "InfoSchemaDb id shouldn't larger than 10000, please restart your FE server";
+            // Every time we construct the InfoSchemaDb, which id will increment.
+            // When InfoSchemaDb id larger than 10000 and put it to idToDb,
+            // which may be overwrite the normal db meta in idToDb,
+            // so we ensure InfoSchemaDb id less than 10000.
+            Preconditions.checkState(db.getId() < NEXT_ID_INIT_VALUE, errMsg);
+            idToDb.put(db.getId(), db);
+            fullNameToDb.put(db.getFullName(), db);
+            cluster.addDb(dbName, db.getId());
+            idToCluster.put(cluster.getId(), cluster);
+            nameToCluster.put(cluster.getName(), cluster);
         }
         LOG.info("finished replay cluster from image");
         return checksum;
@@ -6664,22 +6615,20 @@ public class Catalog {
     }
 
     public long loadBrokers(DataInputStream dis, long checksum) throws IOException, DdlException {
-        if (MetaContext.get().getMetaVersion() >= FeMetaVersion.VERSION_31) {
-            int count = dis.readInt();
-            checksum ^= count;
-            for (long i = 0; i < count; ++i) {
-                String brokerName = Text.readString(dis);
-                int size = dis.readInt();
-                checksum ^= size;
-                List<FsBroker> addrs = Lists.newArrayList();
-                for (int j = 0; j < size; j++) {
-                    FsBroker addr = FsBroker.readIn(dis);
-                    addrs.add(addr);
-                }
-                brokerMgr.replayAddBrokers(brokerName, addrs);
+        int count = dis.readInt();
+        checksum ^= count;
+        for (long i = 0; i < count; ++i) {
+            String brokerName = Text.readString(dis);
+            int size = dis.readInt();
+            checksum ^= size;
+            List<FsBroker> addrs = Lists.newArrayList();
+            for (int j = 0; j < size; j++) {
+                FsBroker addr = FsBroker.readIn(dis);
+                addrs.add(addr);
             }
-            LOG.info("finished replay brokerMgr from image");
+            brokerMgr.replayAddBrokers(brokerName, addrs);
         }
+        LOG.info("finished replay brokerMgr from image");
         return checksum;
     }
 
@@ -6984,6 +6933,35 @@ public class Catalog {
         }
     }
 
+    public void replayBackendReplicasInfo(BackendReplicasInfo backendReplicasInfo) {
+        long backendId = backendReplicasInfo.getBackendId();
+        List<BackendReplicasInfo.ReplicaReportInfo> replicaInfos = backendReplicasInfo.getReplicaReportInfos();
+
+        for (BackendReplicasInfo.ReplicaReportInfo info : replicaInfos) {
+            Replica replica = tabletInvertedIndex.getReplica(info.tabletId, backendId);
+            if (replica == null) {
+                LOG.warn("failed to find replica of tablet {} on backend {} when replaying backend report info",
+                        info.tabletId, backendId);
+                continue;
+            }
+
+            switch (info.type) {
+                case BAD:
+                    replica.setBad(true);
+                    break;
+                case MISSING_VERSION:
+                    // The absolute value is meaningless, as long as it is greater than 0.
+                    // This way, in other checking logic, if lastFailedVersion is found to be greater than 0,
+                    // it will be considered a version missing replica and will be handled accordingly.
+                    replica.setLastFailedVersion(1L);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    @Deprecated
     public void replayBackendTabletsInfo(BackendTabletsInfo backendTabletsInfo) {
         List<Pair<Long, Integer>> tabletsWithSchemaHash = backendTabletsInfo.getTabletSchemaHash();
         if (!tabletsWithSchemaHash.isEmpty()) {
@@ -7038,17 +7016,16 @@ public class Catalog {
         }
     }
 
-    // Convert table's distribution type from random to hash.
-    // random distribution is no longer supported.
+    // Convert table's distribution type from hash to random.
     public void convertDistributionType(Database db, OlapTable tbl) throws DdlException {
         tbl.writeLockOrDdlException();
         try {
-            if (!tbl.convertRandomDistributionToHashDistribution()) {
-                throw new DdlException("Table " + tbl.getName() + " is not random distributed");
+            if (!tbl.convertHashDistributionToRandomDistribution()) {
+                throw new DdlException("Table " + tbl.getName() + " is not hash distributed");
             }
             TableInfo tableInfo = TableInfo.createForModifyDistribution(db.getId(), tbl.getId());
             editLog.logModifyDistributionType(tableInfo);
-            LOG.info("finished to modify distribution type of table: " + tbl.getName());
+            LOG.info("finished to modify distribution type of table from hash to random : " + tbl.getName());
         } finally {
             tbl.writeUnlock();
         }
@@ -7059,8 +7036,8 @@ public class Catalog {
         OlapTable olapTable = db.getTableOrMetaException(info.getTableId(), TableType.OLAP);
         olapTable.writeLock();
         try {
-            olapTable.convertRandomDistributionToHashDistribution();
-            LOG.info("replay modify distribution type of table: " + olapTable.getName());
+            olapTable.convertHashDistributionToRandomDistribution();
+            LOG.info("replay modify distribution type of table from hash to random : " + olapTable.getName());
         } finally {
             olapTable.writeUnlock();
         }
@@ -7124,9 +7101,7 @@ public class Catalog {
     }
 
     public long loadPlugins(DataInputStream dis, long checksum) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_78) {
-            Catalog.getCurrentPluginMgr().readFields(dis);
-        }
+        Catalog.getCurrentPluginMgr().readFields(dis);
         LOG.info("finished replay plugins from image");
         return checksum;
     }
