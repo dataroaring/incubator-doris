@@ -107,9 +107,7 @@ TabletReader::~TabletReader() {
 }
 
 OLAPStatus TabletReader::init(const ReaderParams& read_params) {
-    // TODO(yingchun): monitor
-    _tracker.reset(new MemTracker(-1, read_params.tablet->full_name()));
-    _predicate_mem_pool.reset(new MemPool(_tracker.get()));
+    _predicate_mem_pool.reset(new MemPool(read_params.tablet->full_name()));
 
     OLAPStatus res = _init_params(read_params);
     if (res != OLAP_SUCCESS) {
@@ -819,12 +817,12 @@ OLAPStatus TabletReader::_init_delete_condition(const ReaderParams& read_params)
     if (read_params.reader_type == READER_CUMULATIVE_COMPACTION) {
         return OLAP_SUCCESS;
     }
-
-    _tablet->obtain_header_rdlock();
-    OLAPStatus ret = _delete_handler.init(_tablet->tablet_schema(), _tablet->delete_predicates(),
-                                          read_params.version.second, this);
-    _tablet->release_header_lock();
-
+    OLAPStatus ret;
+    {
+        ReadLock rdlock(_tablet->get_header_lock());
+        ret = _delete_handler.init(_tablet->tablet_schema(), _tablet->delete_predicates(),
+                                              read_params.version.second, this);
+    }
     // Only BASE_COMPACTION need set filter_delete = true
     // other reader type:
     // QUERY will filter the row in query layer to keep right result use where clause.

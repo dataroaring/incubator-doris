@@ -39,7 +39,8 @@
 namespace doris {
 
 OlapScanner::OlapScanner(RuntimeState* runtime_state, OlapScanNode* parent, bool aggregation,
-                         bool need_agg_finalize, const TPaloScanRange& scan_range)
+                         bool need_agg_finalize, const TPaloScanRange& scan_range,
+                         const std::shared_ptr<MemTracker>& tracker)
         : _runtime_state(runtime_state),
           _parent(parent),
           _tuple_desc(parent->_tuple_desc),
@@ -48,10 +49,8 @@ OlapScanner::OlapScanner(RuntimeState* runtime_state, OlapScanNode* parent, bool
           _aggregation(aggregation),
           _need_agg_finalize(need_agg_finalize),
           _version(-1),
-          _mem_tracker(MemTracker::CreateTracker(
-                  runtime_state->fragment_mem_tracker()->limit(), "OlapScanner",
-                  runtime_state->fragment_mem_tracker(), true, true, MemTrackerLevel::VERBOSE)) {
-}
+          _mem_tracker(MemTracker::create_tracker(tracker->limit(),
+                                                  tracker->label() + ":OlapScanner", tracker)) {}
 
 Status OlapScanner::prepare(
         const TPaloScanRange& scan_range, const std::vector<OlapScanRange*>& key_ranges,
@@ -79,7 +78,7 @@ Status OlapScanner::prepare(
             return Status::InternalError(ss.str());
         }
         {
-            ReadLock rdlock(_tablet->get_header_lock_ptr());
+            ReadLock rdlock(_tablet->get_header_lock());
             const RowsetSharedPtr rowset = _tablet->rowset_with_max_version();
             if (rowset == nullptr) {
                 std::stringstream ss;
@@ -265,11 +264,14 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
 
     std::unique_ptr<MemPool> mem_pool(new MemPool(_mem_tracker.get()));
     int64_t raw_rows_threshold = raw_rows_read() + config::doris_scanner_row_num;
+    int64_t raw_bytes_threshold = config::doris_scanner_row_bytes;
     {
         SCOPED_TIMER(_parent->_scan_timer);
         while (true) {
-            // Batch is full, break
-            if (batch->is_full()) {
+            // Batch is full or reach raw_rows_threshold or raw_bytes_threshold, break
+            if (batch->is_full() ||
+                batch->tuple_data_pool()->total_reserved_bytes() >= raw_bytes_threshold ||
+                raw_rows_read() >= raw_rows_threshold) {
                 _update_realtime_counter();
                 break;
             }
@@ -421,9 +423,6 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
                 }
             } while (false);
 
-            if (raw_rows_read() >= raw_rows_threshold) {
-                break;
-            }
         }
     }
 
