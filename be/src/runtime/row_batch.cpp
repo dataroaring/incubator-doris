@@ -27,6 +27,7 @@
 #include "runtime/collection_value.h"
 #include "runtime/exec_env.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "runtime/string_value.h"
 #include "runtime/tuple_row.h"
 #include "vec/columns/column_vector.h"
@@ -39,8 +40,8 @@ namespace doris {
 const int RowBatch::AT_CAPACITY_MEM_USAGE = 8 * 1024 * 1024;
 const int RowBatch::FIXED_LEN_BUFFER_LIMIT = AT_CAPACITY_MEM_USAGE / 2;
 
-RowBatch::RowBatch(const RowDescriptor& row_desc, int capacity, MemTracker* mem_tracker)
-        : _mem_tracker(mem_tracker),
+RowBatch::RowBatch(const RowDescriptor& row_desc, int capacity)
+        : _mem_tracker(thread_local_ctx.get()->_thread_mem_tracker_mgr->mem_tracker()),
           _has_in_flight_row(false),
           _num_rows(0),
           _num_uncommitted_rows(0),
@@ -51,13 +52,10 @@ RowBatch::RowBatch(const RowDescriptor& row_desc, int capacity, MemTracker* mem_
           _row_desc(row_desc),
           _auxiliary_mem_usage(0),
           _need_to_return(false),
-          _tuple_data_pool(_mem_tracker) {
-    DCHECK(_mem_tracker != nullptr);
+          _tuple_data_pool() {
     DCHECK_GT(capacity, 0);
     _tuple_ptrs_size = _capacity * _num_tuples_per_row * sizeof(Tuple*);
     DCHECK_GT(_tuple_ptrs_size, 0);
-    // TODO: switch to Init() pattern so we can check memory limit and return Status.
-    _mem_tracker->consume(_tuple_ptrs_size);
     _tuple_ptrs = (Tuple**)(malloc(_tuple_ptrs_size));
     DCHECK(_tuple_ptrs != nullptr);
 }
@@ -68,8 +66,8 @@ RowBatch::RowBatch(const RowDescriptor& row_desc, int capacity, MemTracker* mem_
 //              xfer += iprot->readString(this->tuple_data[_i9]);
 // to allocated string data in special mempool
 // (change via python script that runs over Data_types.cc)
-RowBatch::RowBatch(const RowDescriptor& row_desc, const PRowBatch& input_batch, MemTracker* tracker)
-        : _mem_tracker(tracker),
+RowBatch::RowBatch(const RowDescriptor& row_desc, const PRowBatch& input_batch)
+        : _mem_tracker(thread_local_ctx.get()->_thread_mem_tracker_mgr->mem_tracker()),
           _has_in_flight_row(false),
           _num_rows(input_batch.num_rows()),
           _num_uncommitted_rows(0),
@@ -80,12 +78,9 @@ RowBatch::RowBatch(const RowDescriptor& row_desc, const PRowBatch& input_batch, 
           _row_desc(row_desc),
           _auxiliary_mem_usage(0),
           _need_to_return(false),
-          _tuple_data_pool(_mem_tracker) {
-    DCHECK(_mem_tracker != nullptr);
+          _tuple_data_pool() {
     _tuple_ptrs_size = _num_rows * _num_tuples_per_row * sizeof(Tuple*);
     DCHECK_GT(_tuple_ptrs_size, 0);
-    // TODO: switch to Init() pattern so we can check memory limit and return Status.
-    _mem_tracker->consume(_tuple_ptrs_size);
     _tuple_ptrs = (Tuple**)(malloc(_tuple_ptrs_size));
     DCHECK(_tuple_ptrs != nullptr);
 
@@ -175,32 +170,7 @@ RowBatch::RowBatch(const RowDescriptor& row_desc, const PRowBatch& input_batch, 
 
                 CollectionValue* array_val =
                         tuple->get_collection_slot(slot_collection->tuple_offset());
-
-                // assgin data and null_sign pointer position in tuple_data
-                int data_offset = convert_to<int>(array_val->data());
-                array_val->set_data(tuple_data + data_offset);
-                int null_offset = convert_to<int>(array_val->null_signs());
-                array_val->set_null_signs(convert_to<bool*>(tuple_data + null_offset));
-
-                const TypeDescriptor& item_type = slot_collection->type().children.at(0);
-                if (!item_type.is_string_type()) {
-                    continue;
-                }
-
-                // copy every string item
-                for (size_t k = 0; k < array_val->length(); ++k) {
-                    if (array_val->is_null_at(k)) {
-                        continue;
-                    }
-
-                    StringValue* dst_item_v = convert_to<StringValue*>(
-                            (uint8_t*)array_val->data() + k * item_type.get_slot_size());
-
-                    if (dst_item_v->len != 0) {
-                        int offset = convert_to<int>(dst_item_v->ptr);
-                        dst_item_v->ptr = tuple_data + offset;
-                    }
-                }
+                CollectionValue::deserialize_collection(array_val, tuple_data, slot_collection->type());
             }
         }
     }
@@ -227,7 +197,6 @@ void RowBatch::clear() {
     }
     DCHECK(_tuple_ptrs != nullptr);
     free(_tuple_ptrs);
-    _mem_tracker->release(_tuple_ptrs_size);
     _tuple_ptrs = nullptr;
     _cleared = true;
 }
@@ -344,7 +313,7 @@ void RowBatch::add_io_buffer(DiskIoMgr::BufferDescriptor* buffer) {
     DCHECK(buffer != nullptr);
     _io_buffers.push_back(buffer);
     _auxiliary_mem_usage += buffer->buffer_len();
-    buffer->set_mem_tracker(std::shared_ptr<MemTracker>(_mem_tracker)); // TODO(yingchun): fixme
+    buffer->update_mem_tracker(_mem_tracker.get());
 }
 
 Status RowBatch::resize_and_allocate_tuple_buffer(RuntimeState* state, int64_t* tuple_buffer_size,
@@ -423,8 +392,7 @@ void RowBatch::transfer_resource_ownership(RowBatch* dest) {
         DiskIoMgr::BufferDescriptor* buffer = _io_buffers[i];
         dest->_io_buffers.push_back(buffer);
         dest->_auxiliary_mem_usage += buffer->buffer_len();
-        buffer->set_mem_tracker(
-                std::shared_ptr<MemTracker>(dest->_mem_tracker)); // TODO(yingchun): fixme
+        buffer->update_mem_tracker(dest->_mem_tracker.get());
     }
     _io_buffers.clear();
 
@@ -533,7 +501,7 @@ void RowBatch::acquire_state(RowBatch* src) {
         DiskIoMgr::BufferDescriptor* buffer = src->_io_buffers[i];
         _io_buffers.push_back(buffer);
         _auxiliary_mem_usage += buffer->buffer_len();
-        buffer->set_mem_tracker(std::shared_ptr<MemTracker>(_mem_tracker)); // TODO(yingchun): fixme
+        buffer->update_mem_tracker(_mem_tracker.get());
     }
     src->_io_buffers.clear();
     src->_auxiliary_mem_usage = 0;
@@ -597,24 +565,7 @@ size_t RowBatch::total_byte_size() const {
                 // compute data null_signs size
                 CollectionValue* array_val =
                         tuple->get_collection_slot(slot_collection->tuple_offset());
-                result += array_val->length() * sizeof(bool);
-
-                const TypeDescriptor& item_type = slot_collection->type().children.at(0);
-                result += array_val->length() * item_type.get_slot_size();
-
-                if (!item_type.is_string_type()) {
-                    continue;
-                }
-
-                // compute string type item size
-                for (int k = 0; k < array_val->length(); ++k) {
-                    if (array_val->is_null_at(k)) {
-                        continue;
-                    }
-                    StringValue* dst_item_v = convert_to<StringValue*>(
-                            (uint8_t*)array_val->data() + k * item_type.get_slot_size());
-                    result += dst_item_v->len;
-                }
+                result += array_val->get_byte_size(slot_collection->type());
             }
         }
     }

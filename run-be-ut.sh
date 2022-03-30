@@ -76,6 +76,10 @@ eval set -- "$OPTS"
 
 PARALLEL=$[$(nproc)/5+1]
 
+if [[ -z ${USE_LLD} ]]; then
+    USE_LLD=OFF
+fi
+
 CLEAN=0
 RUN=0
 VECTORIZED_ONLY=0
@@ -133,6 +137,7 @@ ${CMAKE_CMD} -G "${GENERATOR}" \
     -DCMAKE_MAKE_PROGRAM="${MAKE_PROGRAM}" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
     -DMAKE_TEST=ON \
+    -DUSE_LLD=${USE_LLD} \
     -DGLIBC_COMPATIBILITY="${GLIBC_COMPATIBILITY}" \
     -DBUILD_META_TOOL=OFF \
     -DWITH_MYSQL=OFF \
@@ -181,6 +186,11 @@ if [ -d ${DORIS_TEST_BINARY_DIR}/util/test_data ]; then
 fi
 cp -r ${DORIS_HOME}/be/test/util/test_data ${DORIS_TEST_BINARY_DIR}/util/
 cp -r ${DORIS_HOME}/be/test/plugin/plugin_test ${DORIS_TEST_BINARY_DIR}/plugin/
+
+# prepare ut temp dir
+UT_TMP_DIR=${DORIS_HOME}/ut_dir
+rm -rf ${UT_TMP_DIR} && mkdir ${UT_TMP_DIR}
+touch ${UT_TMP_DIR}/tmp_file
 
 # find all executable test files
 

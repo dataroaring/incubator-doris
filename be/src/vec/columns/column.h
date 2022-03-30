@@ -64,6 +64,13 @@ public:
     /// If column is ColumnLowCardinality, transforms is to full column.
     virtual Ptr convert_to_full_column_if_low_cardinality() const { return get_ptr(); }
 
+    /// If column isn't ColumnDictionary, return itself.
+    /// If column is ColumnDictionary, transforms is to predicate column.
+    virtual Ptr convert_to_predicate_column_if_dictionary() { return get_ptr(); }
+
+    /// If column is ColumnDictionary, and is a range comparison predicate, convert dict encoding
+    virtual void convert_dict_codes_if_necessary() {}
+
     /// Creates empty column with the same type.
     virtual MutablePtr clone_empty() const { return clone_resized(0); }
 
@@ -178,8 +185,10 @@ public:
     virtual void insert_many_fix_len_data(const char* pos, size_t num) {
       LOG(FATAL) << "Method insert_many_fix_len_data is not supported for " << get_name();
     }
- 
-    virtual void insert_many_dict_data(const int32_t* data_array, size_t start_index, const StringRef* dict, size_t num) {
+
+    // todo(zeno) Use dict_args temp object to cover all arguments
+    virtual void insert_many_dict_data(const int32_t* data_array, size_t start_index,
+                                       const StringRef* dict, size_t data_num, uint32_t dict_num = 0) {
       LOG(FATAL) << "Method insert_many_dict_data is not supported for " << get_name();
     }
  
@@ -426,6 +435,8 @@ public:
 
     virtual bool is_predicate_column() const { return false; }
 
+    virtual bool is_column_dictionary() const { return false; }
+
     /// If the only value column can contain is NULL.
     /// Does not imply type of object, because it can be ColumnNullable(ColumnNothing) or ColumnConst(ColumnNullable(ColumnNothing))
     virtual bool only_null() const { return false; }
@@ -514,7 +525,6 @@ bool is_column_const(const IColumn& column);
 
 /// True if column's an ColumnNullable instance. It's just a syntax sugar for type check.
 bool is_column_nullable(const IColumn& column);
-
 } // namespace doris::vectorized
 
 // Wrap `ColumnPtr` because `ColumnPtr` can't be used in forward declaration.

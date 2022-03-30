@@ -21,6 +21,7 @@
 #include "exprs/expr.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 
 namespace doris {
 ExceptNode::ExceptNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs)
@@ -40,6 +41,7 @@ Status ExceptNode::init(const TPlanNode& tnode, RuntimeState* state) {
 
 Status ExceptNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(SetOperationNode::open(state));
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER_ERR_CB("Except Node, while probing the hash table.");
     // if a table is empty, the result must be empty
     if (_hash_tbl->size() == 0) {
         _hash_tbl_iterator = _hash_tbl->begin();
@@ -55,15 +57,13 @@ Status ExceptNode::open(RuntimeState* state) {
         }
 
         // probe
-        _probe_batch.reset(
-                new RowBatch(child(i)->row_desc(), state->batch_size(), mem_tracker().get()));
+        _probe_batch.reset(new RowBatch(child(i)->row_desc(), state->batch_size()));
         ScopedTimer<MonotonicStopWatch> probe_timer(_probe_timer);
         RETURN_IF_ERROR(child(i)->open(state));
         eos = false;
         while (!eos) {
             RETURN_IF_CANCELLED(state);
             RETURN_IF_ERROR(child(i)->get_next(state, _probe_batch.get(), &eos));
-            RETURN_IF_INSTANCE_LIMIT_EXCEEDED(state, " Except , while probing the hash table.");
             for (int j = 0; j < _probe_batch->num_rows(); ++j) {
                 _hash_tbl_iterator = _hash_tbl->find(_probe_batch->get_row(j));
                 if (_hash_tbl_iterator != _hash_tbl->end()) {

@@ -28,11 +28,10 @@
 #include "util/date_func.h"
 #include "util/mysql_row_buffer.h"
 #include "util/types.h"
-
-#include "vec/core/block.h"
-#include "vec/columns/column_vector.h"
 #include "vec/columns/column_nullable.h"
+#include "vec/columns/column_vector.h"
 #include "vec/common/assert_cast.h"
+#include "vec/core/block.h"
 #include "vec/exprs/vexpr.h"
 #include "vec/exprs/vexpr_context.h"
 
@@ -121,7 +120,8 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
     }
 
     case TYPE_HLL:
-    case TYPE_OBJECT: {
+    case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE: {
         if (_output_object_data) {
             const StringValue* string_val = (const StringValue*)(item);
 
@@ -167,10 +167,10 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
     }
 
     case TYPE_ARRAY: {
-        auto children_type = type.children[0].type;
+        auto children_type = type.children[0];
         auto array_value = (const CollectionValue*)(item);
 
-        ArrayIterator iter = array_value->iterator(children_type);
+        ArrayIterator iter = array_value->iterator(children_type.type);
 
         _row_buffer->open_dynamic_mode();
 
@@ -181,13 +181,16 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
             if (begin != 0) {
                 buf_ret = _row_buffer->push_string(", ", 2);
             }
-
-            if (children_type == TYPE_CHAR || children_type == TYPE_VARCHAR) {
-                buf_ret = _row_buffer->push_string("'", 1);
-                buf_ret = _add_row_value(index, children_type, iter.value());
-                buf_ret = _row_buffer->push_string("'", 1);
+            if (!iter.value()) {
+                buf_ret = _row_buffer->push_string("NULL", 4);
             } else {
-                buf_ret = _add_row_value(index, children_type, iter.value());
+                if (children_type == TYPE_CHAR || children_type == TYPE_VARCHAR) {
+                    buf_ret = _row_buffer->push_string("'", 1);
+                    buf_ret = _add_row_value(index, children_type, iter.value());
+                    buf_ret = _row_buffer->push_string("'", 1);
+                } else {
+                    buf_ret = _add_row_value(index, children_type, iter.value());
+                }
             }
 
             iter.next();

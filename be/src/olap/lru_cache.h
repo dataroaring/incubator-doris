@@ -316,7 +316,7 @@ public:
                           CachePriority priority = CachePriority::NORMAL);
     Cache::Handle* lookup(const CacheKey& key, uint32_t hash);
     void release(Cache::Handle* handle);
-    void erase(const CacheKey& key, uint32_t hash);
+    void erase(const CacheKey& key, uint32_t hash, MemTracker* tracker);
     int64_t prune();
     int64_t prune_if(CacheValuePredicate pred);
 
@@ -339,7 +339,7 @@ private:
     size_t _capacity = 0;
 
     // _mutex protects the following state.
-    Mutex _mutex;
+    std::mutex _mutex;
     size_t _usage = 0;
 
     // Dummy head of LRU list.

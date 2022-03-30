@@ -31,6 +31,7 @@
 #include "runtime/mem_pool.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "service/backend_options.h"
 #include "util/doris_metrics.h"
 #include "util/mem_util.hpp"
@@ -49,8 +50,10 @@ OlapScanner::OlapScanner(RuntimeState* runtime_state, OlapScanNode* parent, bool
           _aggregation(aggregation),
           _need_agg_finalize(need_agg_finalize),
           _version(-1),
-          _mem_tracker(MemTracker::create_tracker(tracker->limit(),
-                                                  tracker->label() + ":OlapScanner", tracker)) {}
+          _mem_tracker(MemTracker::create_tracker(
+                  tracker->limit(),
+                  tracker->label() + ":OlapScanner:" + thread_local_ctx.get()->thread_id_str(),
+                  tracker)) {}
 
 Status OlapScanner::prepare(
         const TPaloScanRange& scan_range, const std::vector<OlapScanRange*>& key_ranges,
@@ -59,8 +62,11 @@ Status OlapScanner::prepare(
                 bloom_filters) {
     set_tablet_reader();
     // set limit to reduce end of rowset and segment mem use
-    _tablet_reader->set_batch_size(_parent->limit() == -1 ? _parent->_runtime_state->batch_size() : std::min(
-            static_cast<int64_t>(_parent->_runtime_state->batch_size()), _parent->limit()));
+    _tablet_reader->set_batch_size(
+            _parent->limit() == -1
+                    ? _parent->_runtime_state->batch_size()
+                    : std::min(static_cast<int64_t>(_parent->_runtime_state->batch_size()),
+                               _parent->limit()));
 
     // Get olap table
     TTabletId tablet_id = scan_range.tablet_id;
@@ -92,7 +98,7 @@ Status OlapScanner::prepare(
             // the rowsets maybe compacted when the last olap scanner starts
             Version rd_version(0, _version);
             OLAPStatus acquire_reader_st =
-                    _tablet->capture_rs_readers(rd_version, &_tablet_reader_params.rs_readers, _mem_tracker);
+                    _tablet->capture_rs_readers(rd_version, &_tablet_reader_params.rs_readers);
             if (acquire_reader_st != OLAP_SUCCESS) {
                 LOG(WARNING) << "fail to init reader.res=" << acquire_reader_st;
                 std::stringstream ss;
@@ -125,8 +131,9 @@ Status OlapScanner::open() {
     if (res != OLAP_SUCCESS) {
         OLAP_LOG_WARNING("fail to init reader.[res=%d]", res);
         std::stringstream ss;
-        ss << "failed to initialize storage reader. tablet=" << _tablet_reader_params.tablet->full_name()
-           << ", res=" << res << ", backend=" << BackendOptions::get_localhost();
+        ss << "failed to initialize storage reader. tablet="
+           << _tablet_reader_params.tablet->full_name() << ", res=" << res
+           << ", backend=" << BackendOptions::get_localhost();
         return Status::InternalError(ss.str().c_str());
     }
     return Status::OK();
@@ -149,7 +156,8 @@ Status OlapScanner::_init_tablet_reader_params(
         _tablet_reader_params.conditions.push_back(filter);
     }
     std::copy(bloom_filters.cbegin(), bloom_filters.cend(),
-              std::inserter(_tablet_reader_params.bloom_filters, _tablet_reader_params.bloom_filters.begin()));
+              std::inserter(_tablet_reader_params.bloom_filters,
+                            _tablet_reader_params.bloom_filters.begin()));
 
     // Range
     for (auto key_range : key_ranges) {
@@ -172,13 +180,21 @@ Status OlapScanner::_init_tablet_reader_params(
     bool single_version =
             (_tablet_reader_params.rs_readers.size() == 1 &&
              _tablet_reader_params.rs_readers[0]->rowset()->start_version() == 0 &&
-             !_tablet_reader_params.rs_readers[0]->rowset()->rowset_meta()->is_segments_overlapping()) ||
+             !_tablet_reader_params.rs_readers[0]
+                      ->rowset()
+                      ->rowset_meta()
+                      ->is_segments_overlapping()) ||
             (_tablet_reader_params.rs_readers.size() == 2 &&
              _tablet_reader_params.rs_readers[0]->rowset()->rowset_meta()->num_rows() == 0 &&
              _tablet_reader_params.rs_readers[1]->rowset()->start_version() == 2 &&
-             !_tablet_reader_params.rs_readers[1]->rowset()->rowset_meta()->is_segments_overlapping());
+             !_tablet_reader_params.rs_readers[1]
+                      ->rowset()
+                      ->rowset_meta()
+                      ->is_segments_overlapping());
 
     _tablet_reader_params.origin_return_columns = &_return_columns;
+    _tablet_reader_params.tablet_columns_convert_to_null_set = &_tablet_columns_convert_to_null_set;
+
     if (_aggregation || single_version) {
         _tablet_reader_params.return_columns = _return_columns;
         _tablet_reader_params.direct_mode = true;
@@ -197,7 +213,8 @@ Status OlapScanner::_init_tablet_reader_params(
     }
 
     // use _tablet_reader_params.return_columns, because reader use this to merge sort
-    OLAPStatus res = _read_row_cursor.init(_tablet->tablet_schema(), _tablet_reader_params.return_columns);
+    OLAPStatus res =
+            _read_row_cursor.init(_tablet->tablet_schema(), _tablet_reader_params.return_columns);
     if (res != OLAP_SUCCESS) {
         OLAP_LOG_WARNING("fail to init row cursor.[res=%d]", res);
         return Status::InternalError("failed to initialize storage read row cursor");
@@ -229,6 +246,8 @@ Status OlapScanner::_init_return_columns() {
             return Status::InternalError(ss.str());
         }
         _return_columns.push_back(index);
+        if (slot->is_nullable() && !_tablet->tablet_schema().column(index).is_nullable())
+            _tablet_columns_convert_to_null_set.emplace(index);
         _query_slots.push_back(slot);
     }
 
@@ -277,7 +296,7 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
             }
             // Read one row from reader
             auto res = _tablet_reader->next_row_with_aggregation(&_read_row_cursor, mem_pool.get(),
-                                                          batch->agg_object_pool(), eof);
+                                                                 batch->agg_object_pool(), eof);
             if (res != OLAP_SUCCESS) {
                 std::stringstream ss;
                 ss << "Internal Error: read storage fail. res=" << res
@@ -355,39 +374,16 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
                 // Copy collection slot
                 for (auto desc : _parent->_collection_slots) {
                     CollectionValue* slot = tuple->get_collection_slot(desc->tuple_offset());
-
-                    TypeDescriptor item_type = desc->type().children.at(0);
-                    size_t item_size = item_type.get_slot_size() * slot->length();
-
-                    size_t nulls_size = slot->length();
-                    uint8_t* data = batch->tuple_data_pool()->allocate(item_size + nulls_size);
-
-                    // copy null_signs
-                    memory_copy(data, slot->null_signs(), nulls_size);
-                    memory_copy(data + nulls_size, slot->data(), item_size);
-
-                    slot->set_null_signs(reinterpret_cast<bool*>(data));
-                    slot->set_data(reinterpret_cast<char*>(data + nulls_size));
-
-                    if (!item_type.is_string_type()) {
-                        continue;
-                    }
-
-                    // when string type, copy every item
-                    for (int i = 0; i < slot->length(); ++i) {
-                        int item_offset = nulls_size + i * item_type.get_slot_size();
-                        if (slot->is_null_at(i)) {
-                            continue;
-                        }
-                        StringValue* dst_item_v =
-                                reinterpret_cast<StringValue*>(data + item_offset);
-                        if (dst_item_v->len != 0) {
-                            char* string_copy = reinterpret_cast<char*>(
-                                    batch->tuple_data_pool()->allocate(dst_item_v->len));
-                            memory_copy(string_copy, dst_item_v->ptr, dst_item_v->len);
-                            dst_item_v->ptr = string_copy;
-                        }
-                    }
+                    const TypeDescriptor& item_type = desc->type().children.at(0);
+                    auto pool = batch->tuple_data_pool();
+                    CollectionValue::deep_copy_collection(
+                        slot, item_type, [pool](int size) -> MemFootprint {
+                            int64_t offset = pool->total_allocated_bytes();
+                            uint8_t* data = pool->allocate(size);
+                            return { offset, data };
+                        },
+                        false
+                    );
                 }
                 // the memory allocate by mem pool has been copied,
                 // so we should release these memory immediately
@@ -422,7 +418,6 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
                     }
                 }
             } while (false);
-
         }
     }
 
@@ -450,6 +445,7 @@ void OlapScanner::_convert_row_to_tuple(Tuple* tuple) {
         }
         case TYPE_VARCHAR:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_HLL:
         case TYPE_STRING: {
             Slice* slice = reinterpret_cast<Slice*>(ptr);
@@ -537,8 +533,7 @@ void OlapScanner::update_counter() {
     COUNTER_UPDATE(_parent->_del_filtered_counter, stats.rows_del_filtered);
     COUNTER_UPDATE(_parent->_del_filtered_counter, stats.rows_vec_del_cond_filtered);
 
-    COUNTER_UPDATE(_parent->_conditions_filtered_counter,
-                   stats.rows_conditions_filtered);
+    COUNTER_UPDATE(_parent->_conditions_filtered_counter, stats.rows_conditions_filtered);
     COUNTER_UPDATE(_parent->_key_range_filtered_counter, stats.rows_key_range_filtered);
 
     COUNTER_UPDATE(_parent->_index_load_timer, stats.index_load_ns);
@@ -551,8 +546,7 @@ void OlapScanner::update_counter() {
     COUNTER_UPDATE(_parent->_total_pages_num_counter, stats.total_pages_num);
     COUNTER_UPDATE(_parent->_cached_pages_num_counter, stats.cached_pages_num);
 
-    COUNTER_UPDATE(_parent->_bitmap_index_filter_counter,
-                   stats.rows_bitmap_index_filtered);
+    COUNTER_UPDATE(_parent->_bitmap_index_filter_counter, stats.rows_bitmap_index_filtered);
     COUNTER_UPDATE(_parent->_bitmap_index_filter_timer, stats.bitmap_index_filter_timer);
     COUNTER_UPDATE(_parent->_block_seek_counter, stats.block_seek_num);
 

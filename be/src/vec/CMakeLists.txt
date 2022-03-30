@@ -39,6 +39,7 @@ set(VEC_FILES
   aggregate_functions/aggregate_function_simple_factory.cpp
   columns/collator.cpp
   columns/column.cpp
+  columns/column_array.cpp
   columns/column_const.cpp
   columns/column_decimal.cpp
   columns/column_nullable.cpp
@@ -57,7 +58,9 @@ set(VEC_FILES
   core/sort_block.cpp
   core/materialize_block.cpp
   data_types/data_type.cpp
+  data_types/data_type_array.cpp
   data_types/data_type_bitmap.cpp
+  data_types/data_type_factory.cpp
   data_types/data_type_hll.cpp
   data_types/data_type_nothing.cpp
   data_types/data_type_nothing.cpp
@@ -92,18 +95,24 @@ set(VEC_FILES
   exec/vanalytic_eval_node.cpp
   exec/vassert_num_rows_node.cpp
   exec/vrepeat_node.cpp
+  exec/vtable_function_node.cpp
   exec/join/vhash_join_node.cpp
   exprs/vectorized_agg_fn.cpp
   exprs/vectorized_fn_call.cpp
   exprs/vexpr.cpp
   exprs/vexpr_context.cpp
   exprs/vliteral.cpp
+  exprs/varray_literal.cpp
   exprs/vin_predicate.cpp
   exprs/vtuple_is_null_predicate.cpp
   exprs/vslot_ref.cpp
   exprs/vcast_expr.cpp
   exprs/vcase_expr.cpp
   exprs/vinfo_func.cpp
+  exprs/table_function/vexplode_split.cpp
+  exprs/table_function/vexplode_numbers.cpp
+  functions/array/function_array_index.cpp
+  functions/array/function_array_register.cpp
   functions/math.cpp
   functions/function_bitmap.cpp
   functions/function_bitmap_variadic.cpp
@@ -152,6 +161,7 @@ set(VEC_FILES
   functions/function_date_or_datetime_to_string.cpp
   functions/function_datetime_string_to_string.cpp
   functions/function_grouping.cpp
+  functions/function_java_udf.cpp
   functions/function_rpc.cpp
   functions/function_convert_tz.cpp
   functions/least_greast.cpp

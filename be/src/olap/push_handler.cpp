@@ -91,13 +91,14 @@ OLAPStatus PushHandler::_do_streaming_ingestion(TabletSharedPtr tablet, const TP
     if (!base_migration_rlock.owns_lock()) {
         return OLAP_ERR_RWLOCK_ERROR;
     }
-    tablet->obtain_push_lock();
     PUniqueId load_id;
     load_id.set_hi(0);
     load_id.set_lo(0);
-    RETURN_NOT_OK(StorageEngine::instance()->txn_manager()->prepare_txn(
-            request.partition_id, tablet, request.transaction_id, load_id));
-    tablet->release_push_lock();
+    {
+        std::lock_guard<std::mutex> push_lock(tablet->get_push_lock());
+        RETURN_NOT_OK(StorageEngine::instance()->txn_manager()->prepare_txn(
+                request.partition_id, tablet, request.transaction_id, load_id));
+    }
 
     if (tablet_vars->size() == 1) {
         tablet_vars->resize(2);
@@ -905,9 +906,7 @@ OLAPStatus PushBrokerReader::init(const Schema* schema, const TBrokerScanRange& 
     }
     _runtime_profile = _runtime_state->runtime_profile();
     _runtime_profile->set_name("PushBrokerReader");
-    _mem_tracker = MemTracker::create_tracker(-1, "PushBrokerReader",
-                                             _runtime_state->instance_mem_tracker());
-    _mem_pool.reset(new MemPool(_mem_tracker.get()));
+    _mem_pool.reset(new MemPool("PushBrokerReader"));
     _counter.reset(new ScannerCounter());
 
     // init scanner

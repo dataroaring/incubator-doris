@@ -93,26 +93,9 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     endif()
 endif()
 
-set(PIC_LIB_PATH "${THIRDPARTY_DIR}")
-if(PIC_LIB_PATH)
-    message(STATUS "defined PIC_LIB_PATH")
-    set(CMAKE_SKIP_RPATH TRUE)
-    set(Boost_USE_STATIC_LIBS ON)
-    set(Boost_USE_STATIC_RUNTIME ON)
-    set(LIBBZ2 ${PIC_LIB_PATH}/lib/libbz2.a)
-    set(LIBZ ${PIC_LIB_PATH}/lib/libz.a)
-    set(LIBEVENT ${PIC_LIB_PATH}/lib/libevent.a)
-    set(LIBEVENT_PTHREADS ${PIC_LIB_PATH}/lib/libevent_pthreads.a)
-else()
-    message(STATUS "undefined PIC_LIB_PATH")
-    set(Boost_USE_STATIC_LIBS ON)
-    set(Boost_USE_STATIC_RUNTIME ON)
-    set(LIBBZ2 -lbz2)
-    set(LIBZ -lz)
-    set(LIBEVENT event)
-    set(LIBEVENT_PTHREADS libevent_pthreads)
-endif()
-
+set(CMAKE_SKIP_RPATH TRUE)
+set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_STATIC_RUNTIME ON)
 
 # Compile generated source if necessary
 message(STATUS "build gensrc if necessary")
@@ -143,6 +126,9 @@ set_target_properties(gflags PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/
 add_library(glog STATIC IMPORTED)
 set_target_properties(glog PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libglog.a)
 
+add_library(backtrace STATIC IMPORTED)
+set_target_properties(backtrace PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libbacktrace.a)
+
 add_library(re2 STATIC IMPORTED)
 set_target_properties(re2 PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libre2.a)
 
@@ -165,6 +151,9 @@ set_target_properties(protoc PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/
 
 add_library(gtest STATIC IMPORTED)
 set_target_properties(gtest PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libgtest.a)
+
+add_library(gtest_main STATIC IMPORTED)
+set_target_properties(gtest_main PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libgtest_main.a)
 
 add_library(benchmark STATIC IMPORTED)
 set_target_properties(benchmark PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libbenchmark.a)
@@ -202,6 +191,12 @@ set_target_properties(libevent PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/li
 
 add_library(libevent_pthreads STATIC IMPORTED)
 set_target_properties(libevent_pthreads PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libevent_pthreads.a)
+
+add_library(libbz2 STATIC IMPORTED)
+set_target_properties(libbz2 PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libbz2.a)
+
+add_library(libz STATIC IMPORTED)
+set_target_properties(libz PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libz.a)
 
 add_library(crypto STATIC IMPORTED)
 set_target_properties(crypto PROPERTIES IMPORTED_LOCATION ${THIRDPARTY_DIR}/lib/libcrypto.a)
@@ -363,7 +358,7 @@ set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBOOST_SYSTEM_NO_DEPRECATED")
 # Enable the cpu and heap profile of brpc
 set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -DBRPC_ENABLE_CPU_PROFILER")
 
-if (USE_LDD)
+if (USE_LLD)
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fuse-ld=lld")
 endif ()
 
@@ -474,6 +469,24 @@ include_directories(
     ${THIRDPARTY_DIR}/include/breakpad/
 )
 
+if (BUILD_JAVA_UDF)
+    execute_process(COMMAND sh ${BASE_DIR}/../tools/find_libjvm.sh OUTPUT_VARIABLE LIBJVM_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    FILE(GLOB_RECURSE LIB_JVM ${LIBJVM_PATH})
+    if(${LIB_JVM} STREQUAL "")
+        message(STATUS "Disable JAVA UDF because there is no libjvm found!")
+    else()
+        set(DORIS_DEPENDENCIES
+            ${DORIS_DEPENDENCIES}
+            jvm
+        )
+        add_library(jvm SHARED IMPORTED)
+        set_target_properties(jvm PROPERTIES IMPORTED_LOCATION ${LIB_JVM})
+        include_directories($ENV{JAVA_HOME}/include)
+        include_directories($ENV{JAVA_HOME}/include/linux)
+        add_definitions("-DLIBJVM")
+    endif()
+endif()
+
 set(WL_START_GROUP "-Wl,--start-group")
 set(WL_END_GROUP "-Wl,--end-group")
 
@@ -503,7 +516,6 @@ set(DORIS_LINK_LIBS
     Exec
     Exprs
     Gutil
-    Memory
     Olap
     Rowset
     OlapFs
@@ -529,6 +541,7 @@ endif()
 # When adding new dependencies, If you don’t know if it can run on all platforms,
 # add it here first.
 set(COMMON_THIRDPARTY
+    backtrace
     rocksdb
     cyrus-sasl
     libs2
@@ -545,8 +558,8 @@ set(COMMON_THIRDPARTY
     idn
     gsasl
     curl
-    ${LIBZ}
-    ${LIBBZ2}
+    libz
+    libbz2
     gflags
     brpc
     protobuf
@@ -635,7 +648,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     set(UBSAN_LIBS -static-libubsan tcmalloc)
     set(TSAN_LIBS -static-libtsan)
 else ()
-    set(UBSAN_LIBS tcmalloc)
+    set(UBSAN_LIBS -rtlib=compiler-rt tcmalloc)
 endif ()
 
 # Add sanitize static link flags or tcmalloc
@@ -670,6 +683,7 @@ set (TEST_LINK_LIBS ${DORIS_LINK_LIBS}
     Test_util
     gmock
     gtest
+    gtest_main
     ${WL_END_GROUP}
 )
 
@@ -677,6 +691,10 @@ set (TEST_LINK_LIBS ${DORIS_LINK_LIBS}
 set(BUILD_SHARED_LIBS OFF)
 
 if (${MAKE_TEST} STREQUAL "ON")
+    if (USE_LLD)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fuse-ld=lld")
+    endif ()
+
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage -DGTEST_USE_OWN_TR1_TUPLE=0")
     SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-arcs -ftest-coverage -lgcov")
     add_definitions(-DBE_TEST)

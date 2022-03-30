@@ -101,7 +101,7 @@ After the vectorized execution engine is enabled,  `V` mark will be added before
 
 ## Some differences from the row-store execution engine
 
-In most scenarios, users only need to turn on the seesion variable by default to transparently enable the vectorized execution engine and improve the performance of SQL execution. However, **the current vectorized execution engine is different from the original row-stored execution engine in the following minor details, which requires users to know**. This part of the difference is divided into two categories
+In most scenarios, users only need to turn on the session variable by default to transparently enable the vectorized execution engine and improve the performance of SQL execution. However, **the current vectorized execution engine is different from the original row-stored execution engine in the following minor details, which requires users to know**. This part of the difference is divided into two categories
 
 * **Type A** : functions that need to be deprecated and deprecated or depended on by the inline execution engine.
 * **Type B**: Not supported on the vectorized execution engine in the short term, but will be supported by development in the future.
@@ -118,9 +118,6 @@ In most scenarios, users only need to turn on the seesion variable by default to
 
 1. The `geolocation function` is not supported, including all functions starting with `ST_` in the function. For details, please refer to the section on SQL functions in the official documentation.
 2. The `UDF` and `UDAF` of the original row storage execution engine are not supported.
-3. It is not supported to rewrite the between statement into a compound judgment statement, which will result in the following error: `BetweenPredicate needs to be rewritten into a CompoundPredicate`.
-4. The `TupleIsNull` function is not supported, which may cause partial outer joins and expressions with non-Nullable functions to obtain the required NULL value.
-5. The maximum length of `string/text` type is 1MB instead of the default 2GB. That is, when the vectorization engine is turned on, it is impossible to query or import strings larger than 1MB. However, if you turn off the vectorization engine, you can still query and import normally.
-6. The export method of `select ... into outfile` is not supported.
-7. Lateral view is not supported.
-8. Extrenal broker appearance is not supported.
+3. The maximum length of `string/text` type is 1MB instead of the default 2GB. That is, when the vectorization engine is turned on, it is impossible to query or import strings larger than 1MB. However, if you turn off the vectorization engine, you can still query and import normally.
+4. The export method of `select ... into outfile` is not supported.
+5. Extrenal broker appearance is not supported.

@@ -81,7 +81,7 @@ Runtime Filter在查询规划时生成，在HashJoinNode中构建，在ScanNode�
 ```
 可见，和谓词下推、分区裁剪不同，Runtime Filter是在运行时动态生成的过滤条件，即在查询运行时解析join on clause确定过滤表达式，并将表达式广播给正在读取左表的ScanNode，从而减少扫描的数据量，进而减少probe hash table的次数，避免不必要的I/O和网络传输。
 
-Runtime Filter主要用于优化针对大表的join，如果左表的数据量太小，或者右表的数据量太大，则Runtime Filter可能不会取得预期效果。
+Runtime Filter主要用于大表join小表的优化，如果左表的数据量太小，或者右表的数据量太大，则Runtime Filter可能不会取得预期效果。
 
 ## 使用方式
 
@@ -91,7 +91,7 @@ Runtime Filter主要用于优化针对大表的join，如果左表的数据量�
 
 - 第一个查询选项是调整使用的Runtime Filter类型，大多数情况下，您只需要调整这一个选项，其他选项保持默认即可。
 
-  - `runtime_filter_type`: 包括Bloom Filter、MinMax Filter、IN predicate、IN_OR_BLOOM Filter，默认会使用IN_OR_BLOOM Filter，部分情况下同时使用Bloom Filter、MinMax Filter、IN predicate时性能更高。
+  - `runtime_filter_type`: 包括Bloom Filter、MinMax Filter、IN predicate、IN Or Bloom Filter，默认会使用IN Or Bloom Filter，部分情况下同时使用Bloom Filter、MinMax Filter、IN predicate时性能更高。
 
 - 其他查询选项通常仅在某些特定场景下，才需进一步调整以达到最优效果。通常只在性能测试后，针对资源密集型、运行耗时足够长且频率足够高的查询进行优化。
 
@@ -114,7 +114,7 @@ Runtime Filter主要用于优化针对大表的join，如果左表的数据量�
 #### 1.runtime_filter_type
 使用的Runtime Filter类型。
 
-**类型**: 数字(1, 2, 4, 8)或者相对应的助记符字符串(IN, BLOOM_FILTER, MIN_MAX, IN_OR_BLOOM_FILTER)，默认8(IN_OR_BLOOM Filter)，使用多个时用逗号分隔，注意需要加引号，或者将任意多个类型的数字相加，例如:
+**类型**: 数字(1, 2, 4, 8)或者相对应的助记符字符串(IN, BLOOM_FILTER, MIN_MAX, ```IN_OR_BLOOM_FILTER```)，默认8(```IN_OR_BLOOM_FILTER```)，使用多个时用逗号分隔，注意需要加引号，或者将任意多个类型的数字相加，例如:
 ```
 set runtime_filter_type="BLOOM_FILTER,IN,MIN_MAX";
 ```

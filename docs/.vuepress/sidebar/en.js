@@ -542,7 +542,8 @@ module.exports = [
             children: [
               "explode-bitmap",
               "explode-split",
-              "explode-json-array"
+              "explode-json-array",
+              "explode-numbers"
             ],
           },
           "window-function",
@@ -577,10 +578,12 @@ module.exports = [
             directoryPath: "Administration/",
             initialOpenGroupIndex: -1,
             children: [
+              "ADMIN CANCEL REBALANCE DISK",
               "ADMIN CANCEL REPAIR",
               "ADMIN CLEAN TRASH",
               "ADMIN CHECK TABLET",
               "ADMIN COMPACT",
+              "ADMIN REBALANCE DISK",
               "ADMIN REPAIR",
               "ADMIN SET CONFIG",
               "ADMIN SET REPLICA STATUS",
@@ -763,6 +766,7 @@ module.exports = [
       "be-vscode-dev",
       "java-format-code",
       "cpp-format-code",
+      "cpp-diagnostic-code",
       "How-to-Share-blogs",
       "minidump",
       "bitmap-hll-file-format",

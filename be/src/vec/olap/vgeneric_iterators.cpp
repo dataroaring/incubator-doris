@@ -21,7 +21,6 @@
 #include "olap/iterators.h"
 #include "olap/row.h"
 #include "olap/row_block2.h"
-#include "olap/row_cursor_cell.h"
 
 namespace doris {
 
@@ -139,12 +138,9 @@ public:
             const auto& column_ids = schema.column_ids();
             for (size_t i = 0; i < schema.num_column_ids(); ++i) {
                 auto column_desc = schema.column(column_ids[i]);
-                auto data_type = Schema::get_data_type_ptr(column_desc->type());
+                auto data_type = Schema::get_data_type_ptr(*column_desc);
                 if (data_type == nullptr) {
                     return Status::RuntimeError("invalid data type");
-                }
-                if (column_desc->is_nullable()) {
-                    data_type = std::make_shared<vectorized::DataTypeNullable>(std::move(data_type));
                 }
                 auto column = data_type->create_column();
                 column->reserve(_block_row_max);
@@ -199,7 +195,7 @@ public:
     // Don't call this when valid() is false, action is undefined
     Status advance();
 
-    // Return if has remaining data in this context.
+    // Return if it has remaining data in this context.
     // Only when this function return true, current_row()
     // will return a valid row
     bool valid() const { return _valid; }
@@ -266,11 +262,8 @@ Status VMergeIteratorContext::_load_next_block() {
 class VMergeIterator : public RowwiseIterator {
 public:
     // VMergeIterator takes the ownership of input iterators
-    VMergeIterator(std::vector<RowwiseIterator*>& iters, std::shared_ptr<MemTracker> parent, int sequence_id_idx) : 
-        _origin_iters(iters),_sequence_id_idx(sequence_id_idx) {
-        // use for count the mem use of Block use in Merge
-        _mem_tracker = MemTracker::create_tracker(-1, "VMergeIterator", parent);
-    }
+    VMergeIterator(std::vector<RowwiseIterator*>& iters, int sequence_id_idx) : 
+        _origin_iters(iters),_sequence_id_idx(sequence_id_idx) {}
 
     ~VMergeIterator() override {
         while (!_merge_heap.empty()) {
@@ -356,13 +349,10 @@ Status VMergeIterator::next_batch(vectorized::Block* block) {
 // VUnionIterator will read data from input iterator one by one.
 class VUnionIterator : public RowwiseIterator {
 public:
-    // Iterators' ownership it transfered to this class.
+    // Iterators' ownership it transferred to this class.
     // This class will delete all iterators when destructs
-    // Client should not use iterators any more.
-    VUnionIterator(std::vector<RowwiseIterator*>& v, std::shared_ptr<MemTracker> parent)
-            : _origin_iters(v.begin(), v.end()) {
-        _mem_tracker = MemTracker::create_tracker(-1, "VUnionIterator", parent);
-    }
+    // Client should not use iterators anymore.
+    VUnionIterator(std::vector<RowwiseIterator*>& v) : _origin_iters(v.begin(), v.end()) {}
 
     ~VUnionIterator() override {
         std::for_each(_origin_iters.begin(), _origin_iters.end(), std::default_delete<RowwiseIterator>());
@@ -412,18 +402,18 @@ Status VUnionIterator::next_batch(vectorized::Block* block) {
 }
 
 
-RowwiseIterator* new_merge_iterator(std::vector<RowwiseIterator*>& inputs, std::shared_ptr<MemTracker> parent, int sequence_id_idx) {
+RowwiseIterator* new_merge_iterator(std::vector<RowwiseIterator*>& inputs, int sequence_id_idx) {
     if (inputs.size() == 1) {
         return *(inputs.begin());
     }
-    return new VMergeIterator(inputs, parent, sequence_id_idx);
+    return new VMergeIterator(inputs, sequence_id_idx);
 }
 
-RowwiseIterator* new_union_iterator(std::vector<RowwiseIterator*>& inputs, std::shared_ptr<MemTracker> parent) {
+RowwiseIterator* new_union_iterator(std::vector<RowwiseIterator*>& inputs) {
     if (inputs.size() == 1) {
         return *(inputs.begin());
     }
-    return new VUnionIterator(inputs, parent);
+    return new VUnionIterator(inputs);
 }
 
 RowwiseIterator* new_auto_increment_iterator(const Schema& schema, size_t num_rows) {

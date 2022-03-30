@@ -214,7 +214,7 @@ Clean up pages that may be saved by the buffer pool
 
 * Type: string
 * Description: The largest allocatable memory of the buffer pool
-* Default value: 80G
+* Default value: 20%
 
 The maximum amount of memory available in the BE buffer pool. The buffer pool is a new memory management structure of BE, which manages the memory by the buffer page and enables spill data to disk. The memory for all concurrent queries will be allocated from the buffer pool. The current buffer pool only works on **AggregationNode** and **ExchangeNode**.
 
@@ -1425,6 +1425,12 @@ The size of the buffer before flashing
   
 * Default: 3
 
+### `track_new_delete`
+
+* Type: bool
+* Description: Whether Hook TCmalloc new/delete, currently consume/release tls mem tracker in Hook.
+* Default: true
+
 ### `mem_tracker_level`
 
 * Type: int16
@@ -1513,3 +1519,8 @@ Translated with www.DeepL.com/Translator (free version)
 * Type: int32
 * Description: The maximum amount of data read by each OlapScanner.
 * Default: 1024
+
+### `string_type_length_soft_limit_bytes`
+* Type: int32
+* Description: A soft limit of string type length.
+* Description: 1048576

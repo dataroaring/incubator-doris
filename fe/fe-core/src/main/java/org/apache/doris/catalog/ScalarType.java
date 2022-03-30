@@ -151,6 +151,8 @@ public class ScalarType extends Type {
                 return createHllType();
             case BITMAP:
                 return BITMAP;
+            case QUANTILE_STATE:
+                return QUANTILE_STATE;
             case DATE:
                 return DATE;
             case DATETIME:
@@ -196,12 +198,13 @@ public class ScalarType extends Type {
                 return createVarcharType();
             case "STRING":
             case "TEXT":
-            case "BLOB":
                 return createStringType();
             case "HLL":
                 return createHllType();
             case "BITMAP":
                 return BITMAP;
+            case "QUANTILE_STATE":
+                return QUANTILE_STATE;
             case "DATE":
                 return DATE;
             case "DATETIME":
@@ -382,6 +385,7 @@ public class ScalarType extends Type {
             case DATETIME:
             case HLL:
             case BITMAP:
+            case QUANTILE_STATE:
                 stringBuilder.append(type.toString().toLowerCase());
                 break;
             case STRING:
@@ -756,6 +760,8 @@ public class ScalarType extends Type {
                 return 16385;
             case BITMAP:
                 return 1024; // this is a estimated value
+            case QUANTILE_STATE:
+                return 1024; // TODO(weixiang): no used in FE, figure out whether can delete this funcion?
             case STRING:
                 return 1024;
             default:

@@ -207,7 +207,7 @@ Metrics: {"filtered_rows":0,"input_row_num":3346807,"input_rowsets_count":42,"in
 
 * 类型：string
 * 描述：buffer pool之中最大的可分配内存
-* 默认值：80G
+* 默认值：20%
 
 BE缓存池最大的内存可用量，buffer pool是BE新的内存管理结构，通过buffer page来进行内存管理，并能够实现数据的落盘。并发的所有查询的内存申请都会通过buffer pool来申请。当前buffer pool仅作用在**AggregationNode**与**ExchangeNode**。
 
@@ -1444,6 +1444,12 @@ webserver默认工作线程数
   ```
 * 默认值: 3
 
+### `track_new_delete`
+
+* 类型：bool
+* 描述：是否Hook TCmalloc new/delete，目前在Hook中统计thread local MemTracker。
+* 默认值：true
+
 ### `mem_tracker_level`
 
 * 类型: int16
@@ -1530,3 +1536,8 @@ webserver默认工作线程数
 * 类型: int32
 * 描述: 每个OlapScanner 读取的最大数据量
 * 默认值: 1024
+
+### `string_type_length_soft_limit_bytes`
+* 类型: int32
+* 描述: String 类型最大长度的软限，单位是字节
+* 默认值: 1048576

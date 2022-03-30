@@ -142,6 +142,7 @@ Expr::Expr(const TypeDescriptor& type)
     case TYPE_HLL:
     case TYPE_OBJECT:
     case TYPE_STRING:
+    case TYPE_QUANTILE_STATE:
         _node_type = (TExprNodeType::STRING_LITERAL);
         break;
 
@@ -199,6 +200,7 @@ Expr::Expr(const TypeDescriptor& type, bool is_slotref)
         case TYPE_VARCHAR:
         case TYPE_HLL:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_STRING:
             _node_type = (TExprNodeType::STRING_LITERAL);
             break;
@@ -687,6 +689,7 @@ doris_udf::AnyVal* Expr::get_const_val(ExprContext* context) {
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         _constant_val.reset(new StringVal(get_string_val(context, nullptr)));
         break;
@@ -824,7 +827,7 @@ void Expr::assign_fn_ctx_idx(int* next_fn_ctx_idx) {
 Status Expr::create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeState* state,
                     ObjectPool* pool, Expr** scalar_expr) {
     *scalar_expr = nullptr;
-    Expr* root;
+    Expr* root = nullptr;
     RETURN_IF_ERROR(create_expr(pool, texpr.nodes[0], &root));
     RETURN_IF_ERROR(create_tree(texpr, pool, root));
     // TODO pengyubing replace by Init()
@@ -848,7 +851,7 @@ Status Expr::create(const std::vector<TExpr>& texprs, const RowDescriptor& row_d
                     RuntimeState* state, ObjectPool* pool, std::vector<Expr*>* exprs) {
     exprs->clear();
     for (const TExpr& texpr : texprs) {
-        Expr* expr;
+        Expr* expr = nullptr;
         RETURN_IF_ERROR(create(texpr, row_desc, state, pool, &expr));
         DCHECK(expr != nullptr);
         exprs->push_back(expr);

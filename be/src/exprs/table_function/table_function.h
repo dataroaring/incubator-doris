@@ -17,14 +17,18 @@
 
 #pragma once
 
+#include <fmt/core.h>
+#include <stddef.h>
+
 #include "common/status.h"
+#include "vec/core/block.h"
+#include "vec/exprs/vexpr_context.h"
 
 namespace doris {
 
 // TODO: think about how to manager memeory consumption of table functions.
 // Currently, the memory allocated from table function is from malloc directly.
-class TableFunctionState {
-};
+class TableFunctionState {};
 
 class ExprContext;
 class TupleRow;
@@ -32,26 +36,72 @@ class TableFunction {
 public:
     virtual ~TableFunction() {}
 
-    virtual Status prepare() = 0;
-    virtual Status open() = 0;
-    virtual Status process(TupleRow* tuple_row) = 0;
+    virtual Status prepare() { return Status::OK(); }
+
+    virtual Status open() { return Status::OK(); }
+
+    virtual Status process(TupleRow* tuple_row) {
+        return Status::NotSupported(fmt::format("table function {} not supported now.", _fn_name));
+    }
+
+    // only used for vectorized.
+    virtual Status process_init(vectorized::Block* block) {
+        return Status::NotSupported(
+                fmt::format("vectorized table function {} not supported now.", _fn_name));
+    }
+
+    // only used for vectorized.
+    virtual Status process_row(size_t row_idx) {
+        return Status::NotSupported(
+                fmt::format("vectorized table function {} not supported now.", _fn_name));
+    }
+
+    // only used for vectorized.
+    virtual Status process_close() {
+        return Status::NotSupported(
+                fmt::format("vectorized table function {} not supported now.", _fn_name));
+    }
+
     virtual Status reset() = 0;
+
     virtual Status get_value(void** output) = 0;
-    virtual Status close() = 0;
 
-    virtual Status forward(bool *eos) = 0;
+    // only used for vectorized.
+    virtual Status get_value_length(int64_t* length) {
+        *length = -1;
+        return Status::OK();
+    }
 
-public:
+    virtual Status close() { return Status::OK(); }
+
+    virtual Status forward(bool* eos) {
+        if (_is_current_empty) {
+            *eos = true;
+            _eos = true;
+        } else {
+            ++_cur_offset;
+            if (_cur_offset == _cur_size) {
+                *eos = true;
+                _eos = true;
+            } else {
+                *eos = false;
+            }
+        }
+        return Status::OK();
+    }
+
     std::string name() const { return _fn_name; }
     bool eos() const { return _eos; }
 
-    void set_expr_context(ExprContext* expr_context) {
-        _expr_context = expr_context;
+    void set_expr_context(ExprContext* expr_context) { _expr_context = expr_context; }
+    void set_vexpr_context(vectorized::VExprContext* vexpr_context) {
+        _vexpr_context = vexpr_context;
     }
 
 protected:
     std::string _fn_name;
-    ExprContext* _expr_context;
+    ExprContext* _expr_context = nullptr;
+    vectorized::VExprContext* _vexpr_context = nullptr;
     // true if there is no more data can be read from this function.
     bool _eos = false;
     // true means the function result set from current row is empty(eg, source value is null or empty).

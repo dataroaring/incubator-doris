@@ -28,6 +28,7 @@
 #include "runtime/collection_value.h"
 #include "runtime/primitive_type.h"
 #include "thrift/protocol/TDebugProtocol.h"
+#include "vec/data_types/data_type_array.h"
 #include "vec/data_types/data_type_bitmap.h"
 #include "vec/data_types/data_type_date.h"
 #include "vec/data_types/data_type_date_time.h"
@@ -45,7 +46,6 @@ struct TypeDescriptor {
     /// Only set if type == TYPE_CHAR or type == TYPE_VARCHAR
     int len;
     static const int MAX_VARCHAR_LENGTH = OLAP_VARCHAR_MAX_LENGTH;
-    static const int MAX_STRING_LENGTH = OLAP_STRING_MAX_LENGTH;
     static const int MAX_CHAR_LENGTH = 255;
     static const int MAX_CHAR_INLINE_LENGTH = 128;
 
@@ -99,7 +99,7 @@ struct TypeDescriptor {
     static TypeDescriptor create_string_type() {
         TypeDescriptor ret;
         ret.type = TYPE_STRING;
-        ret.len = MAX_STRING_LENGTH;
+        ret.len = config::string_type_length_soft_limit_bytes;
         return ret;
     }
 
@@ -164,7 +164,7 @@ struct TypeDescriptor {
 
     inline bool is_string_type() const {
         return type == TYPE_VARCHAR || type == TYPE_CHAR || type == TYPE_HLL ||
-               type == TYPE_OBJECT || type == TYPE_STRING;
+               type == TYPE_OBJECT || type == TYPE_QUANTILE_STATE || type == TYPE_STRING;
     }
 
     inline bool is_date_type() const { return type == TYPE_DATE || type == TYPE_DATETIME; }
@@ -175,7 +175,7 @@ struct TypeDescriptor {
 
     inline bool is_var_len_string_type() const {
         return type == TYPE_VARCHAR || type == TYPE_HLL || type == TYPE_CHAR ||
-               type == TYPE_OBJECT || type == TYPE_STRING;
+               type == TYPE_OBJECT || type == TYPE_QUANTILE_STATE || type == TYPE_STRING;
     }
 
     inline bool is_complex_type() const {
@@ -192,6 +192,7 @@ struct TypeDescriptor {
         case TYPE_VARCHAR:
         case TYPE_HLL:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_STRING:
             return 0;
 
@@ -231,6 +232,7 @@ struct TypeDescriptor {
         case TYPE_VARCHAR:
         case TYPE_HLL:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_STRING:
             return sizeof(StringValue);
 
@@ -271,59 +273,6 @@ struct TypeDescriptor {
         }
         // For llvm complain
         return -1;
-    }
-
-    inline doris::vectorized::DataTypePtr get_data_type_ptr() const {
-        switch (type) {
-        case TYPE_BOOLEAN:
-            return std::make_shared<vectorized::DataTypeUInt8>();
-
-        case TYPE_TINYINT:
-            return std::make_shared<vectorized::DataTypeInt8>();
-
-        case TYPE_SMALLINT:
-            return std::make_shared<vectorized::DataTypeInt16>();
-
-        case TYPE_INT:
-            return std::make_shared<vectorized::DataTypeInt32>();
-
-        case TYPE_FLOAT:
-            return std::make_shared<vectorized::DataTypeFloat32>();
-
-        case TYPE_BIGINT:
-            return std::make_shared<vectorized::DataTypeInt64>();
-
-        case TYPE_LARGEINT:
-            return std::make_shared<vectorized::DataTypeInt128>();
-        case TYPE_DATE:
-            return std::make_shared<vectorized::DataTypeDate>();
-        case TYPE_DATETIME:
-            return std::make_shared<vectorized::DataTypeDateTime>();
-        case TYPE_TIME:
-        case TYPE_DOUBLE:
-            return std::make_shared<vectorized::DataTypeFloat64>();
-
-        case TYPE_STRING:
-        case TYPE_CHAR:
-        case TYPE_VARCHAR:
-            return std::make_shared<vectorized::DataTypeString>();
-        case TYPE_HLL:
-            return std::make_shared<vectorized::DataTypeHLL>();
-        case TYPE_OBJECT:
-            return std::make_shared<vectorized::DataTypeBitMap>();
-
-        case TYPE_DECIMALV2:
-            return std::make_shared<vectorized::DataTypeDecimal<vectorized::Decimal128>>(27, 9);
-        // Just Mock A NULL Type in Vec Exec Engine
-        case TYPE_NULL:
-            return std::make_shared<vectorized::DataTypeUInt8>();
-
-        case INVALID_TYPE:
-        default:
-            DCHECK(false);
-        }
-        // For llvm complain
-        return nullptr;
     }
 
     static inline int get_decimal_byte_size(int precision) {

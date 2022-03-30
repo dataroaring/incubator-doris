@@ -22,6 +22,7 @@
 #include "exec/exec_node.h"
 #include "runtime/mem_pool.h"
 #include "runtime/row_batch.h"
+#include "runtime/thread_context.h"
 #include "util/defer_op.h"
 #include "vec/core/block.h"
 #include "vec/data_types/data_type_nullable.h"
@@ -208,6 +209,7 @@ Status AggregationNode::prepare(RuntimeState* state) {
     _merge_timer = ADD_TIMER(runtime_profile(), "MergeTime");
     _expr_timer = ADD_TIMER(runtime_profile(), "ExprTime");
     _get_results_timer = ADD_TIMER(runtime_profile(), "GetResultsTime");
+    _data_mem_tracker = MemTracker::create_virtual_tracker(-1, "AggregationNode:Data", mem_tracker());
 
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     _intermediate_tuple_desc = state->desc_tbl().get_tuple_descriptor(_intermediate_tuple_id);
@@ -216,7 +218,7 @@ Status AggregationNode::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(
             VExpr::prepare(_probe_expr_ctxs, state, child(0)->row_desc(), expr_mem_tracker()));
 
-    _mem_pool = std::make_unique<MemPool>(mem_tracker().get());
+    _mem_pool = std::make_unique<MemPool>();
 
     int j = _probe_expr_ctxs.size();
     for (int i = 0; i < j; ++i) {
@@ -331,6 +333,7 @@ Status AggregationNode::prepare(RuntimeState* state) {
 
 Status AggregationNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::open(state));
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER_ERR_CB("aggregator, while execute open.");
     SCOPED_TIMER(_runtime_profile->total_time_counter());
 
     RETURN_IF_ERROR(VExpr::open(_probe_expr_ctxs, state));
@@ -355,7 +358,6 @@ Status AggregationNode::open(RuntimeState* state) {
         }
         RETURN_IF_ERROR(_executor.execute(&block));
         _executor.update_memusage();
-        RETURN_IF_INSTANCE_LIMIT_EXCEEDED(state, "aggregator, while execute open.");
     }
 
     return Status::OK();
@@ -366,6 +368,7 @@ Status AggregationNode::get_next(RuntimeState* state, RowBatch* row_batch, bool*
 }
 
 Status AggregationNode::get_next(RuntimeState* state, Block* block, bool* eos) {
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER_ERR_CB("aggregator, while execute get_next.");
     SCOPED_TIMER(_runtime_profile->total_time_counter());
 
     if (_is_streaming_preagg) {
@@ -395,7 +398,6 @@ Status AggregationNode::get_next(RuntimeState* state, Block* block, bool* eos) {
     }
 
     _executor.update_memusage();
-    RETURN_IF_INSTANCE_LIMIT_EXCEEDED(state, "aggregator, while execute get_next.");
     return Status::OK();
 }
 
@@ -555,7 +557,7 @@ Status AggregationNode::_merge_without_key(Block* block) {
 }
 
 void AggregationNode::_update_memusage_without_key() {
-    mem_tracker()->consume(_agg_arena_pool.size() - _mem_usage_record.used_in_arena);
+    _data_mem_tracker->consume(_agg_arena_pool.size() - _mem_usage_record.used_in_arena);
     _mem_usage_record.used_in_arena = _agg_arena_pool.size();
 }
 
@@ -1078,8 +1080,8 @@ void AggregationNode::_update_memusage_with_serialized_key() {
     std::visit(
             [&](auto&& agg_method) -> void {
                 auto& data = agg_method.data;
-                mem_tracker()->consume(_agg_arena_pool.size() - _mem_usage_record.used_in_arena);
-                mem_tracker()->consume(data.get_buffer_size_in_bytes() -
+                _data_mem_tracker->consume(_agg_arena_pool.size() - _mem_usage_record.used_in_arena);
+                _data_mem_tracker->consume(data.get_buffer_size_in_bytes() -
                                        _mem_usage_record.used_in_state);
                 _mem_usage_record.used_in_state = data.get_buffer_size_in_bytes();
                 _mem_usage_record.used_in_arena = _agg_arena_pool.size();
@@ -1103,7 +1105,7 @@ void AggregationNode::_close_with_serialized_key() {
 }
 
 void AggregationNode::release_tracker() {
-    mem_tracker()->release(_mem_usage_record.used_in_state + _mem_usage_record.used_in_arena);
+   _data_mem_tracker->release(_mem_usage_record.used_in_state + _mem_usage_record.used_in_arena);
 }
 
 } // namespace doris::vectorized

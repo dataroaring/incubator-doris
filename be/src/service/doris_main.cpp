@@ -28,6 +28,8 @@
 #include <unistd.h>
 #include <unordered_map>
 
+#include "util/jni-util.h"
+
 #if defined(LEAK_SANITIZER)
 #include <sanitizer/lsan_interface.h>
 #endif
@@ -42,6 +44,7 @@
 #include "common/daemon.h"
 #include "common/logging.h"
 #include "common/resource_tls.h"
+#include "common/signal_handler.h"
 #include "common/status.h"
 #include "common/utils.h"
 #include "env/env.h"
@@ -60,6 +63,11 @@
 #include "util/thrift_rpc_helper.h"
 #include "util/thrift_server.h"
 #include "util/uid_util.h"
+
+#if !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && \
+        !defined(THREAD_SANITIZER)
+#include "runtime/tcmalloc_hook.h"
+#endif
 
 static void help(const char*);
 
@@ -273,6 +281,7 @@ struct Checker
 ;
 
 int main(int argc, char** argv) {
+    doris::signal::InstallFailureSignalHandler();
 
     // check if print version or help
     if (argc > 1) {
@@ -331,7 +340,8 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-#if !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER)
+#if !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && !defined(LEAK_SANITIZER) && \
+        !defined(THREAD_SANITIZER)
     // Aggressive decommit is required so that unused pages in the TCMalloc page heap are
     // not backed by physical pages and do not contribute towards memory consumption.
     MallocExtension::instance()->SetNumericProperty("tcmalloc.aggressive_memory_decommit", 1);
@@ -341,6 +351,9 @@ int main(int argc, char** argv) {
                 doris::config::tc_max_total_thread_cache_bytes)) {
         fprintf(stderr, "Failed to change TCMalloc total thread cache size.\n");
         return -1;
+    }
+    if (doris::config::track_new_delete) {
+        init_hook();
     }
 #endif
 
@@ -474,6 +487,16 @@ int main(int argc, char** argv) {
         doris::shutdown_logging();
         exit(1);
     }
+
+#ifdef LIBJVM
+    // 6. init jni
+    status = doris::JniUtil::Init();
+    if (!status.ok()) {
+        LOG(WARNING) << "Failed to initialize JNI: " << status.get_error_msg();
+        doris::shutdown_logging();
+        exit(1);
+    }
+#endif
 
     while (!doris::k_doris_exit) {
 #if defined(LEAK_SANITIZER)

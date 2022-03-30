@@ -50,8 +50,8 @@ void register_function_bitmap(SimpleFunctionFactory& factory);
 void register_function_bitmap_variadic(SimpleFunctionFactory& factory);
 void register_function_is_null(SimpleFunctionFactory& factory);
 void register_function_is_not_null(SimpleFunctionFactory& factory);
-void register_function_to_time_fuction(SimpleFunctionFactory& factory);
-void register_function_time_of_fuction(SimpleFunctionFactory& factory);
+void register_function_to_time_function(SimpleFunctionFactory& factory);
+void register_function_time_of_function(SimpleFunctionFactory& factory);
 void register_function_string(SimpleFunctionFactory& factory);
 void register_function_date_time_to_string(SimpleFunctionFactory& factory);
 void register_function_date_time_string_to_string(SimpleFunctionFactory& factory);
@@ -73,6 +73,7 @@ void register_function_datetime_floor_ceil(SimpleFunctionFactory& factory);
 void register_function_convert_tz(SimpleFunctionFactory& factory);
 void register_function_least_greast(SimpleFunctionFactory& factory);
 void register_function_fake(SimpleFunctionFactory& factory);
+void register_function_array(SimpleFunctionFactory& factory);
 
 void register_function_encryption(SimpleFunctionFactory& factory);
 void register_function_regexp_extract(SimpleFunctionFactory& factory);
@@ -173,8 +174,8 @@ public:
             register_function_bit(instance);
             register_function_is_null(instance);
             register_function_is_not_null(instance);
-            register_function_to_time_fuction(instance);
-            register_function_time_of_fuction(instance);
+            register_function_to_time_function(instance);
+            register_function_time_of_function(instance);
             register_function_string(instance);
             register_function_in(instance);
             register_function_if(instance);
@@ -200,6 +201,7 @@ public:
             register_function_encryption(instance);
             register_function_regexp_extract(instance);
             register_function_hex_variadic(instance);
+            register_function_array(instance);
         });
         return instance;
     }

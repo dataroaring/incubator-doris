@@ -64,7 +64,6 @@ set(UTIL_FILES
   mysql_row_buffer.cpp
   tuple_row_compare.cpp
   error_util.cc
-  spinlock.cc
   filesystem_util.cc
   load_error_hub.cpp
   broker_load_error_hub.cpp
@@ -108,6 +107,8 @@ set(UTIL_FILES
   s3_util.cpp
   topn_counter.cpp
   tuple_row_zorder_compare.cpp
+  quantile_state.cpp
+  jni-util.cpp
 )
 
 if (WITH_MYSQL)

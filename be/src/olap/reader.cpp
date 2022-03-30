@@ -37,7 +37,6 @@
 #include "olap/storage_engine.h"
 #include "olap/tablet.h"
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/string_value.hpp"
 #include "util/date_func.h"
 #include "util/mem_util.hpp"
@@ -107,7 +106,7 @@ TabletReader::~TabletReader() {
 }
 
 OLAPStatus TabletReader::init(const ReaderParams& read_params) {
-    _predicate_mem_pool.reset(new MemPool(read_params.tablet->full_name()));
+    _predicate_mem_pool.reset(new MemPool("TabletReader:" + read_params.tablet->full_name()));
 
     OLAPStatus res = _init_params(read_params);
     if (res != OLAP_SUCCESS) {
@@ -279,6 +278,8 @@ OLAPStatus TabletReader::_init_params(const ReaderParams& read_params) {
 OLAPStatus TabletReader::_init_return_columns(const ReaderParams& read_params) {
     if (read_params.reader_type == READER_QUERY) {
         _return_columns = read_params.return_columns;
+        _tablet_columns_convert_to_null_set = read_params.tablet_columns_convert_to_null_set;
+
         if (!_delete_handler.empty()) {
             // We need to fetch columns which there are deletion conditions on them.
             set<uint32_t> column_set(_return_columns.begin(), _return_columns.end());

@@ -21,6 +21,8 @@
 #include "gutil/strings/substitute.h" // for Substitute
 #include "runtime/mem_pool.h"
 #include "util/slice.h" // for Slice
+#include "vec/columns/column.h"
+#include "vec/columns/column_dictionary.h"
 #include "vec/columns/column_vector.h"
 #include "vec/columns/column_string.h"
 #include "vec/columns/column_nullable.h"
@@ -131,7 +133,6 @@ void BinaryDictPageBuilder::reset() {
     } else {
         _data_page_builder->reset();
     }
-    _finished = false;
 }
 
 size_t BinaryDictPageBuilder::count() const {
@@ -239,6 +240,7 @@ void BinaryDictPageDecoder::set_dict_decoder(PageDecoder* dict_decoder, StringRe
 
 Status BinaryDictPageDecoder::next_batch(size_t* n, vectorized::MutableColumnPtr &dst) {
     if (_encoding_type == PLAIN_ENCODING) {
+        dst = (*(std::move(dst->convert_to_predicate_column_if_dictionary()))).assume_mutable();
         return _data_page_decoder->next_batch(n, dst);
     }
     // dictionary encoding
@@ -253,15 +255,14 @@ Status BinaryDictPageDecoder::next_batch(size_t* n, vectorized::MutableColumnPtr
     size_t max_fetch = std::min(*n, static_cast<size_t>(_bit_shuffle_ptr->_num_elements - _bit_shuffle_ptr->_cur_index));
     *n = max_fetch;
  
-    const int32_t* data_array = reinterpret_cast<const int32_t*>(_bit_shuffle_ptr->_chunk.data);
+    const auto* data_array = reinterpret_cast<const int32_t*>(_bit_shuffle_ptr->_chunk.data);
     size_t start_index = _bit_shuffle_ptr->_cur_index;
 
-    dst->insert_many_dict_data(data_array, start_index, _dict_word_info, max_fetch);
+    dst->insert_many_dict_data(data_array, start_index, _dict_word_info, max_fetch, _dict_decoder->_num_elems);
 
     _bit_shuffle_ptr->_cur_index += max_fetch;
  
     return Status::OK();
- 
 }
 
 Status BinaryDictPageDecoder::next_batch(size_t* n, ColumnBlockView* dst) {
@@ -275,7 +276,7 @@ Status BinaryDictPageDecoder::next_batch(size_t* n, ColumnBlockView* dst) {
     if (PREDICT_FALSE(*n == 0)) {
         return Status::OK();
     }
-    Slice* out = reinterpret_cast<Slice*>(dst->data());
+    auto* out = reinterpret_cast<Slice*>(dst->data());
 
     _batch->resize(*n);
 

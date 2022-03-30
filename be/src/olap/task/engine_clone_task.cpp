@@ -55,7 +55,11 @@ EngineCloneTask::EngineCloneTask(const TCloneReq& clone_req, const TMasterInfo& 
           _tablet_infos(tablet_infos),
           _res_status(res_status),
           _signature(signature),
-          _master_info(master_info) {}
+          _master_info(master_info) {
+    _mem_tracker = MemTracker::create_tracker(
+            -1, "clone tablet: " + std::to_string(_clone_req.tablet_id),
+            StorageEngine::instance()->clone_mem_tracker(), MemTrackerLevel::TASK);
+}
 
 OLAPStatus EngineCloneTask::execute() {
     // register the tablet to avoid it is deleted by gc thread during clone process
@@ -521,11 +525,11 @@ OLAPStatus EngineCloneTask::_finish_clone(Tablet* tablet, const string& clone_di
     OLAPStatus res = OLAP_SUCCESS;
     std::vector<string> linked_success_files;
     // clone and compaction operation should be performed sequentially
-    tablet->obtain_base_compaction_lock();
-    tablet->obtain_cumulative_lock();
-    tablet->set_clone_occurred(true);
-    tablet->obtain_push_lock();
     {
+        std::lock_guard<std::mutex> base_compaction_lock(tablet->get_base_compaction_lock());
+        std::lock_guard<std::mutex> cumulative_compaction_lock(tablet->get_cumulative_compaction_lock());
+        tablet->set_clone_occurred(true);
+        std::lock_guard<std::mutex> push_lock(tablet->get_push_lock());
         WriteLock wrlock(tablet->get_header_lock());
         do {
             // check clone dir existed
@@ -614,10 +618,6 @@ OLAPStatus EngineCloneTask::_finish_clone(Tablet* tablet, const string& clone_di
             FileUtils::remove_paths(linked_success_files);
         }
     }
-    tablet->release_push_lock();
-    tablet->release_cumulative_lock();
-    tablet->release_base_compaction_lock();
-
     // clear clone dir
     std::filesystem::path clone_dir_path(clone_dir);
     std::filesystem::remove_all(clone_dir_path);

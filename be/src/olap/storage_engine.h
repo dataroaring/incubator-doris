@@ -322,7 +322,7 @@ private:
 
     static StorageEngine* _s_instance;
 
-    Mutex _gc_mutex;
+    std::mutex _gc_mutex;
     // map<rowset_id(str), RowsetSharedPtr>, if we use RowsetId as the key, we need custom hash func
     std::unordered_map<std::string, RowsetSharedPtr> _unused_rowsets;
 
@@ -385,7 +385,7 @@ private:
     std::map<DataDir*, std::unordered_set<TTabletId>> _tablet_submitted_cumu_compaction;
     std::map<DataDir*, std::unordered_set<TTabletId>> _tablet_submitted_base_compaction;
 
-    AtomicInt32 _wakeup_producer_flag;
+    std::atomic<int32_t> _wakeup_producer_flag {0};
 
     std::mutex _compaction_producer_sleep_mutex;
     std::condition_variable _compaction_producer_sleep_cv;

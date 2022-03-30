@@ -57,22 +57,21 @@ Status ColumnReader::create(const ColumnReaderOptions& opts, const ColumnMetaPB&
             RETURN_IF_ERROR(ColumnReader::create(opts, meta.children_columns(0),
                                                  meta.children_columns(0).num_rows(), path_desc,
                                                  &item_reader));
-            RETURN_IF_ERROR(item_reader->init());
 
             std::unique_ptr<ColumnReader> offset_reader;
             RETURN_IF_ERROR(ColumnReader::create(opts, meta.children_columns(1),
                                                  meta.children_columns(1).num_rows(), path_desc,
                                                  &offset_reader));
-            RETURN_IF_ERROR(offset_reader->init());
 
             std::unique_ptr<ColumnReader> null_reader;
             if (meta.is_nullable()) {
                 RETURN_IF_ERROR(ColumnReader::create(opts, meta.children_columns(2),
                                                      meta.children_columns(2).num_rows(), path_desc,
                                                      &null_reader));
-                RETURN_IF_ERROR(null_reader->init());
             }
 
+            // The num rows of the array reader equals to the num rows of the length reader.
+            num_rows = meta.children_columns(1).num_rows();
             std::unique_ptr<ColumnReader> array_reader(
                     new ColumnReader(opts, meta, num_rows, path_desc));
             //  array reader do not need to init
@@ -127,7 +126,9 @@ Status ColumnReader::init() {
                     "Bad file $0: invalid column index type $1", _path_desc.filepath, index_meta.type()));
         }
     }
-    if (_ordinal_index_meta == nullptr) {
+    // ArrayColumnWriter writes a single empty array and flushes. In this scenario,
+    // the item writer doesn't write any data and the corresponding ordinal index is empty.
+    if (_ordinal_index_meta == nullptr && !is_empty()) {
         return Status::Corruption(strings::Substitute(
                 "Bad file $0: missing ordinal index for column $1", _path_desc.filepath, _meta.column_id()));
     }
@@ -339,6 +340,10 @@ Status ColumnReader::seek_at_or_before(ordinal_t ordinal, OrdinalPageIndexIterat
 }
 
 Status ColumnReader::new_iterator(ColumnIterator** iterator) {
+    if (is_empty()) {
+        *iterator = new EmptyFileColumnIterator();
+        return Status::OK();
+    }
     if (is_scalar_type((FieldType)_meta.type())) {
         *iterator = new FileColumnIterator(this);
         return Status::OK();
@@ -388,7 +393,7 @@ Status ArrayFileColumnIterator::init(const ColumnIteratorOptions& opts) {
     if (_array_reader->is_nullable()) {
         RETURN_IF_ERROR(_null_iterator->init(opts));
     }
-    auto offset_type_info = get_scalar_type_info(FieldType::OLAP_FIELD_TYPE_UNSIGNED_INT);
+    auto offset_type_info = get_scalar_type_info(OLAP_FIELD_TYPE_UNSIGNED_INT);
     RETURN_IF_ERROR(
             ColumnVectorBatch::create(1024, false, offset_type_info, nullptr, &_length_batch));
     return Status::OK();
@@ -427,7 +432,7 @@ Status ArrayFileColumnIterator::next_batch(size_t* n, ColumnBlockView* dst, bool
 
     // read item
     size_t item_size = array_batch->get_item_size(dst->current_offset(), *n);
-    if (item_size > 0) {
+    if (item_size >= 0) {
         bool item_has_null = false;
         ColumnVectorBatch* item_vector_batch = array_batch->elements();
 
@@ -457,9 +462,7 @@ Status ArrayFileColumnIterator::next_batch(size_t* n, ColumnBlockView* dst, bool
 
 FileColumnIterator::FileColumnIterator(ColumnReader* reader) : _reader(reader) {}
 
-FileColumnIterator::~FileColumnIterator() {
-    _opts.mem_tracker->release(_opts.mem_tracker->consumption());
-}
+FileColumnIterator::~FileColumnIterator() {}
 
 Status FileColumnIterator::seek_to_first() {
     RETURN_IF_ERROR(_reader->seek_to_first(&_page_iter));

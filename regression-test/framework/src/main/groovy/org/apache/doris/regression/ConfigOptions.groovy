@@ -42,6 +42,11 @@ class ConfigOptions {
     static Option confOpt
     static Option genOutOpt
     static Option forceGenOutOpt
+    static Option parallelOpt
+    static Option actionParallelOpt
+    static Option randomOrderOpt
+    static Option timesOpt
+    static Option withOutLoadDataOpt
 
     static CommandLine initCommands(String[] args) {
         helpOption = Option.builder("h")
@@ -167,6 +172,44 @@ class ConfigOptions {
                 .longOpt("configurations, format: key=value")
                 .desc("set addition context configurations")
                 .build()
+        parallelOpt = Option.builder("parallel")
+                .argName("parallel")
+                .required(false)
+                .hasArg(true)
+                .optionalArg(true)
+                .type(String.class)
+                .longOpt("parallel")
+                .desc("the num of threads running test")
+                .build()
+        actionParallelOpt = Option.builder("actionParallel")
+                .argName("parallel")
+                .required(false)
+                .hasArg(true)
+                .type(String.class)
+                .longOpt("actionParallel")
+                .desc("the num of threads running for thread action")
+                .build()
+        randomOrderOpt = Option.builder("randomOrder")
+                .required(false)
+                .hasArg(false)
+                .desc("run tests in random order")
+                .build()
+        timesOpt = Option.builder("times")
+                .argName("times")
+                .required(false)
+                .hasArg(true)
+                .optionalArg(true)
+                .type(String.class)
+                .longOpt("times")
+                .desc("the times tests run, load.groovy is run only one time.")
+                .build()
+
+        withOutLoadDataOpt = Option.builder("w")
+                .required(false)
+                .hasArg(false)
+                .longOpt("withOutLoadData")
+                .desc("do not run load.groovy to reload data to Doris.")
+                .build()
 
         Options options = new Options()
                 .addOption(helpOption)
@@ -184,6 +227,10 @@ class ConfigOptions {
                 .addOption(genOutOpt)
                 .addOption(confFileOpt)
                 .addOption(forceGenOutOpt)
+                .addOption(parallelOpt)
+                .addOption(actionParallelOpt)
+                .addOption(randomOrderOpt)
+                .addOption(withOutLoadDataOpt)
 
         CommandLine cmd = new DefaultParser().parse(options, args, true)
         if (cmd.hasOption(helpOption)) {

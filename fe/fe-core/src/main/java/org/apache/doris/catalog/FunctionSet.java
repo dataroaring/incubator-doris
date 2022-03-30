@@ -760,6 +760,11 @@ public class FunctionSet<min_initIN9doris_udf12DecimalV2ValEEEvPNS2_15FunctionCo
     public static final String ORTHOGONAL_BITMAP_INTERSECT_COUNT = "orthogonal_bitmap_intersect_count";
     public static final String ORTHOGONAL_BITMAP_UNION_COUNT = "orthogonal_bitmap_union_count";
 
+    public static final String QUANTILE_UNION = "quantile_union";
+    //TODO(weixiang): is quantile_percent can be replaced by approx_percentile?
+    public static final String QUANTILE_PERCENT = "quantile_percent";
+    public static final String TO_QUANTILE_STATE = "to_quantile_state";
+
     private static final Map<Type, String> ORTHOGONAL_BITMAP_INTERSECT_INIT_SYMBOL =
             ImmutableMap.<Type, String>builder()
                     .put(Type.TINYINT,
@@ -1665,6 +1670,7 @@ public class FunctionSet<min_initIN9doris_udf12DecimalV2ValEEEvPNS2_15FunctionCo
                         null,
                         prefix + STDDEV_POP_FINALIZE_SYMBOL.get(t),
                         false, false, false));
+
                 //vec stddev stddev_samp stddev_pop
                 addBuiltin(AggregateFunction.createBuiltin("stddev",
                         Lists.newArrayList(t), STDDEV_RETTYPE_SYMBOL.get(t), t,
@@ -1966,8 +1972,27 @@ public class FunctionSet<min_initIN9doris_udf12DecimalV2ValEEEvPNS2_15FunctionCo
                 "",
                 "",
                 true, false, true, true));
-      
-              //Percentile
+        //quantile_state
+        addBuiltin(AggregateFunction.createBuiltin(QUANTILE_UNION, Lists.newArrayList(Type.QUANTILE_STATE),
+                Type.QUANTILE_STATE,
+                Type.QUANTILE_STATE,
+                "_ZN5doris22QuantileStateFunctions19quantile_state_initEPN9doris_udf15FunctionContextEPNS1_9StringValE",
+                "_ZN5doris22QuantileStateFunctions14quantile_unionEPN9doris_udf15FunctionContextERKNS1_9StringValEPS4_",
+                "_ZN5doris22QuantileStateFunctions14quantile_unionEPN9doris_udf15FunctionContextERKNS1_9StringValEPS4_",
+                "_ZN5doris22QuantileStateFunctions24quantile_state_serializeEPN9doris_udf15FunctionContextERKNS1_9StringValE",
+                "_ZN5doris22QuantileStateFunctions24quantile_state_serializeEPN9doris_udf15FunctionContextERKNS1_9StringValE",
+                true, false, true));
+
+        addBuiltin(AggregateFunction.createBuiltin(QUANTILE_UNION, Lists.newArrayList(Type.QUANTILE_STATE),
+                Type.QUANTILE_STATE,
+                Type.QUANTILE_STATE,
+                "",
+                "",
+                "",
+                "",
+                "",
+                true, false, true, true));
+        //Percentile
         addBuiltin(AggregateFunction.createBuiltin("percentile",
                 Lists.newArrayList(Type.BIGINT, Type.DOUBLE), Type.DOUBLE, Type.VARCHAR,
                 prefix + "15percentile_initEPN9doris_udf15FunctionContextEPNS1_9StringValE",
@@ -2309,6 +2334,7 @@ public class FunctionSet<min_initIN9doris_udf12DecimalV2ValEEEvPNS2_15FunctionCo
     public static final String EXPLODE_JSON_ARRAY_INT = "explode_json_array_int";
     public static final String EXPLODE_JSON_ARRAY_DOUBLE = "explode_json_array_double";
     public static final String EXPLODE_JSON_ARRAY_STRING = "explode_json_array_string";
+    public static final String EXPLODE_NUMBERS = "explode_numbers";
 
     private void initTableFunction() {
         List<Function> explodeSplits = Lists.newArrayList();
@@ -2350,5 +2376,13 @@ public class FunctionSet<min_initIN9doris_udf12DecimalV2ValEEEvPNS2_15FunctionCo
                 "_ZN5doris19DummyTableFunctions25explode_json_array_stringEPN9doris_udf15FunctionContextERKNS1_9StringValE",
                 null, null, true));
         tableFunctions.put(EXPLODE_JSON_ARRAY_STRING, explodeJsonArrayStrings);
+
+        List<Function> explodeNumbers = Lists.newArrayList();
+        explodeNumbers.add(ScalarFunction.createBuiltin(
+                EXPLODE_NUMBERS, Type.INT, Function.NullableMode.DEPEND_ON_ARGUMENT,
+                Lists.newArrayList(Type.INT), false,
+                "_ZN5doris19DummyTableFunctions22explode_numbersEPN9doris_udf15FunctionContextERKNS1_9IntValE",
+                null, null, true));
+        tableFunctions.put(EXPLODE_NUMBERS, explodeNumbers);
     }
 }

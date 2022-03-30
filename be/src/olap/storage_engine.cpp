@@ -136,13 +136,11 @@ StorageEngine::StorageEngine(const EngineOptions& options)
         _s_instance = this;
     }
     REGISTER_HOOK_METRIC(unused_rowsets_count, [this]() {
-        MutexLock lock(&_gc_mutex);
+        std::lock_guard<std::mutex> lock(_gc_mutex);
         return _unused_rowsets.size();
     });
     REGISTER_HOOK_METRIC(compaction_mem_consumption, [this]() {
         return _compaction_mem_tracker->consumption();
-        // We can get each compaction's detail usage
-        // LOG(INFO) << _compaction_mem_tracker=>LogUsage(2);
     });
 }
 
@@ -873,7 +871,7 @@ void StorageEngine::_parse_default_rowset_type() {
 }
 
 void StorageEngine::start_delete_unused_rowset() {
-    MutexLock lock(&_gc_mutex);
+    std::lock_guard<std::mutex> lock(_gc_mutex);
     for (auto it = _unused_rowsets.begin(); it != _unused_rowsets.end();) {
         if (it->second.use_count() != 1) {
             ++it;
@@ -900,7 +898,7 @@ void StorageEngine::add_unused_rowset(RowsetSharedPtr rowset) {
 
     auto rowset_id = rowset->rowset_id().to_string();
 
-    MutexLock lock(&_gc_mutex);
+    std::lock_guard<std::mutex> lock(_gc_mutex);
     auto it = _unused_rowsets.find(rowset_id);
     if (it == _unused_rowsets.end()) {
         rowset->set_need_delete_file();
@@ -1076,19 +1074,19 @@ OLAPStatus StorageEngine::execute_task(EngineTask* task) {
 
 // check whether any unused rowsets's id equal to rowset_id
 bool StorageEngine::check_rowset_id_in_unused_rowsets(const RowsetId& rowset_id) {
-    MutexLock lock(&_gc_mutex);
+    std::lock_guard<std::mutex> lock(_gc_mutex);
     auto search = _unused_rowsets.find(rowset_id.to_string());
     return search != _unused_rowsets.end();
 }
 
 void StorageEngine::create_cumulative_compaction(
         TabletSharedPtr best_tablet, std::shared_ptr<CumulativeCompaction>& cumulative_compaction) {
-    cumulative_compaction.reset(new CumulativeCompaction(best_tablet, _compaction_mem_tracker));
+    cumulative_compaction.reset(new CumulativeCompaction(best_tablet));
 }
 
 void StorageEngine::create_base_compaction(TabletSharedPtr best_tablet,
                                            std::shared_ptr<BaseCompaction>& base_compaction) {
-    base_compaction.reset(new BaseCompaction(best_tablet, _compaction_mem_tracker));
+    base_compaction.reset(new BaseCompaction(best_tablet));
 }
 
 // Return json:

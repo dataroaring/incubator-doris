@@ -23,6 +23,7 @@
 #include <fmt/format.h>
 #include <snappy.h>
 
+#include <cstring>
 #include <iomanip>
 #include <iterator>
 #include <memory>
@@ -32,97 +33,29 @@
 #include "runtime/row_batch.h"
 #include "runtime/tuple.h"
 #include "runtime/tuple_row.h"
+#include "udf/udf.h"
+#include "vec/columns/column.h"
 #include "vec/columns/column_const.h"
 #include "vec/columns/column_nullable.h"
+#include "vec/columns/column_string.h"
 #include "vec/columns/column_vector.h"
 #include "vec/columns/columns_common.h"
 #include "vec/columns/columns_number.h"
 #include "vec/common/assert_cast.h"
 #include "vec/common/exception.h"
+#include "vec/common/string_ref.h"
 #include "vec/common/typeid_cast.h"
 #include "vec/data_types/data_type_bitmap.h"
 #include "vec/data_types/data_type_date.h"
 #include "vec/data_types/data_type_date_time.h"
 #include "vec/data_types/data_type_decimal.h"
+#include "vec/data_types/data_type_factory.hpp"
 #include "vec/data_types/data_type_hll.h"
 #include "vec/data_types/data_type_nullable.h"
 #include "vec/data_types/data_type_number.h"
 #include "vec/data_types/data_type_string.h"
 
 namespace doris::vectorized {
-
-inline DataTypePtr create_data_type(const PColumnMeta& pcolumn_meta) {
-    switch (pcolumn_meta.type()) {
-    case PGenericType::UINT8: {
-        return std::make_shared<DataTypeUInt8>();
-    }
-    case PGenericType::UINT16: {
-        return std::make_shared<DataTypeUInt16>();
-    }
-    case PGenericType::UINT32: {
-        return std::make_shared<DataTypeUInt32>();
-    }
-    case PGenericType::UINT64: {
-        return std::make_shared<DataTypeUInt64>();
-    }
-    case PGenericType::UINT128: {
-        return std::make_shared<DataTypeUInt128>();
-    }
-    case PGenericType::INT8: {
-        return std::make_shared<DataTypeInt8>();
-    }
-    case PGenericType::INT16: {
-        return std::make_shared<DataTypeInt16>();
-    }
-    case PGenericType::INT32: {
-        return std::make_shared<DataTypeInt32>();
-    }
-    case PGenericType::INT64: {
-        return std::make_shared<DataTypeInt64>();
-    }
-    case PGenericType::INT128: {
-        return std::make_shared<DataTypeInt128>();
-    }
-    case PGenericType::FLOAT: {
-        return std::make_shared<DataTypeFloat32>();
-    }
-    case PGenericType::DOUBLE: {
-        return std::make_shared<DataTypeFloat64>();
-    }
-    case PGenericType::STRING: {
-        return std::make_shared<DataTypeString>();
-    }
-    case PGenericType::DATE: {
-        return std::make_shared<DataTypeDate>();
-    }
-    case PGenericType::DATETIME: {
-        return std::make_shared<DataTypeDateTime>();
-    }
-    case PGenericType::DECIMAL32: {
-        return std::make_shared<DataTypeDecimal<Decimal32>>(
-                pcolumn_meta.decimal_param().precision(), pcolumn_meta.decimal_param().scale());
-    }
-    case PGenericType::DECIMAL64: {
-        return std::make_shared<DataTypeDecimal<Decimal64>>(
-                pcolumn_meta.decimal_param().precision(), pcolumn_meta.decimal_param().scale());
-    }
-    case PGenericType::DECIMAL128: {
-        return std::make_shared<DataTypeDecimal<Decimal128>>(
-                pcolumn_meta.decimal_param().precision(), pcolumn_meta.decimal_param().scale());
-    }
-    case PGenericType::BITMAP: {
-        return std::make_shared<DataTypeBitMap>();
-    }
-    case PGenericType::HLL: {
-        return std::make_shared<DataTypeHLL>();
-    }
-    default: {
-        LOG(FATAL) << fmt::format("Unknown data type: {}, data type name: {}", pcolumn_meta.type(),
-                                  PGenericType_TypeId_Name(pcolumn_meta.type()));
-        return nullptr;
-    }
-    }
-}
 
 Block::Block(std::initializer_list<ColumnWithTypeAndName> il) : data {il} {
     initialize_index_by_name();
@@ -153,14 +86,8 @@ Block::Block(const PBlock& pblock) {
     }
 
     for (const auto& pcol_meta : pblock.column_metas()) {
-        DataTypePtr type = create_data_type(pcol_meta);
-        MutableColumnPtr data_column;
-        if (pcol_meta.is_nullable()) {
-            data_column = ColumnNullable::create(type->create_column(), ColumnUInt8::create());
-            type = make_nullable(type);
-        } else {
-            data_column = type->create_column();
-        }
+        DataTypePtr type = DataTypeFactory::instance().create_data_type(pcol_meta);
+        MutableColumnPtr data_column = type->create_column();
         buf = type->deserialize(buf, data_column.get());
         data.emplace_back(data_column->get_ptr(), type, pcol_meta.name());
     }
@@ -779,63 +706,119 @@ doris::Tuple* Block::deep_copy_tuple(const doris::TupleDescriptor& desc, MemPool
 
     for (int i = 0; i < desc.slots().size(); ++i) {
         auto slot_desc = desc.slots()[i];
-        auto data_ref = get_by_position(column_offset + i).column->get_data_at(row);
-
-        if (data_ref.data == nullptr) {
+        auto& type_desc = slot_desc->type();
+        const auto& column = get_by_position(column_offset + i).column;
+        const auto& data_ref =
+                type_desc.type != TYPE_ARRAY ? column->get_data_at(row) : StringRef();
+        bool is_null = is_column_data_null(slot_desc->type(), data_ref, column, row);
+        if (is_null) {
             dst->set_null(slot_desc->null_indicator_offset());
-            continue;
         } else {
             dst->set_not_null(slot_desc->null_indicator_offset());
-        }
-
-        if (!slot_desc->type().is_string_type() && !slot_desc->type().is_date_type()) {
-            memcpy((void*)dst->get_slot(slot_desc->tuple_offset()), data_ref.data, data_ref.size);
-        } else if (slot_desc->type().is_string_type() && slot_desc->type() != TYPE_OBJECT &&
-                   slot_desc->type() != TYPE_HLL) {
-            memcpy((void*)dst->get_slot(slot_desc->tuple_offset()), (const void*)(&data_ref),
-                   sizeof(data_ref));
-            // Copy the content of string
-            if (padding_char && slot_desc->type() == TYPE_CHAR) {
-                // serialize the content of string
-                auto string_slot = dst->get_string_slot(slot_desc->tuple_offset());
-                string_slot->ptr = reinterpret_cast<char*>(pool->allocate(slot_desc->type().len));
-                string_slot->len = slot_desc->type().len;
-                memset(string_slot->ptr, 0, slot_desc->type().len);
-                memcpy(string_slot->ptr, data_ref.data, data_ref.size);
-            } else {
-                auto str_ptr = pool->allocate(data_ref.size);
-                memcpy(str_ptr, data_ref.data, data_ref.size);
-                dst->get_string_slot(slot_desc->tuple_offset())->ptr =
-                        reinterpret_cast<char*>(str_ptr);
-            }
-        } else if (slot_desc->type() == TYPE_OBJECT) {
-            auto bitmap_value = (BitmapValue*)(data_ref.data);
-            auto size = bitmap_value->getSizeInBytes();
-
-            // serialize the content of string
-            auto string_slot = dst->get_string_slot(slot_desc->tuple_offset());
-            string_slot->ptr = reinterpret_cast<char*>(pool->allocate(size));
-            bitmap_value->write(string_slot->ptr);
-            string_slot->len = size;
-        } else if (slot_desc->type() == TYPE_HLL) {
-            auto hll_value = (HyperLogLog*)(data_ref.data);
-            auto size = hll_value->max_serialized_size();
-            auto string_slot = dst->get_string_slot(slot_desc->tuple_offset());
-            string_slot->ptr = reinterpret_cast<char*>(pool->allocate(size));
-            size_t actual_size = hll_value->serialize((uint8_t*)string_slot->ptr);
-            string_slot->len = actual_size;
-        } else {
-            VecDateTimeValue ts =
-                    *reinterpret_cast<const doris::vectorized::VecDateTimeValue*>(data_ref.data);
-            DateTimeValue dt;
-            ts.convert_vec_dt_to_dt(&dt);
-            memcpy((void*)dst->get_slot(slot_desc->tuple_offset()), &dt, sizeof(DateTimeValue));
+            deep_copy_slot(dst->get_slot(slot_desc->tuple_offset()), pool, type_desc, data_ref,
+                           column.get(), row, padding_char);
         }
     }
     return dst;
 }
 
-MutableBlock::MutableBlock(const std::vector<TupleDescriptor *>& tuple_descs) {
+inline bool Block::is_column_data_null(const doris::TypeDescriptor& type_desc,
+                                       const StringRef& data_ref, const IColumn* column, int row) {
+    if (type_desc.type != TYPE_ARRAY) {
+        return data_ref.data == nullptr;
+    } else {
+        Field array;
+        column->get(row, array);
+        return array.is_null();
+    }
+}
+
+// TODO: need to refactor this function, too long.
+void Block::deep_copy_slot(void* dst, MemPool* pool, const doris::TypeDescriptor& type_desc,
+                           const StringRef& data_ref, const IColumn* column, int row,
+                           bool padding_char) {
+    if (type_desc.is_collection_type()) {
+        if (type_desc.type != TYPE_ARRAY) {
+            return;
+        }
+
+        Field field;
+        column->get(row, field);
+        const auto& array = field.get<Array>();
+        auto collection_value = reinterpret_cast<CollectionValue*>(dst);
+        auto item_type_desc = type_desc.children.front();
+        CollectionValue::init_collection(pool, array.size(), item_type_desc.type, collection_value);
+
+        const ColumnArray* array_column = nullptr;
+        if (is_column_nullable(*column)) {
+            auto& nested_column =
+                    reinterpret_cast<const ColumnNullable*>(column)->get_nested_column();
+            array_column = reinterpret_cast<const ColumnArray*>(&nested_column);
+        } else {
+            array_column = reinterpret_cast<const ColumnArray*>(column);
+        }
+        auto item_column = array_column->get_data_ptr().get();
+        auto offset = array_column->get_offsets()[row - 1];
+        for (int i = 0; i < collection_value->length(); ++i) {
+            char* item_dst = reinterpret_cast<char*>(collection_value->mutable_data()) +
+                             i * item_type_desc.get_slot_size();
+            if (array[i].is_null()) {
+                const auto& null_value = doris_udf::AnyVal(true);
+                collection_value->set(i, item_type_desc.type, &null_value);
+            } else {
+                auto item_offset = offset + i;
+                const auto& data_ref = item_type_desc.type != TYPE_ARRAY
+                                               ? item_column->get_data_at(item_offset)
+                                               : StringRef();
+                deep_copy_slot(item_dst, pool, item_type_desc, data_ref, item_column, item_offset,
+                               padding_char);
+            }
+        }
+    } else if (type_desc.is_date_type()) {
+        VecDateTimeValue ts =
+                *reinterpret_cast<const doris::vectorized::VecDateTimeValue*>(data_ref.data);
+        DateTimeValue dt;
+        ts.convert_vec_dt_to_dt(&dt);
+        memcpy(dst, &dt, sizeof(DateTimeValue));
+    } else if (type_desc.type == TYPE_OBJECT) {
+        auto bitmap_value = (BitmapValue*)(data_ref.data);
+        auto size = bitmap_value->getSizeInBytes();
+
+        // serialize the content of string
+        auto string_slot = reinterpret_cast<StringValue*>(dst);
+        string_slot->ptr = reinterpret_cast<char*>(pool->allocate(size));
+        bitmap_value->write(string_slot->ptr);
+        string_slot->len = size;
+    } else if (type_desc.type == TYPE_HLL) {
+        auto hll_value = (HyperLogLog*)(data_ref.data);
+        auto size = hll_value->max_serialized_size();
+        auto string_slot = reinterpret_cast<StringValue*>(dst);
+        string_slot->ptr = reinterpret_cast<char*>(pool->allocate(size));
+        size_t actual_size = hll_value->serialize((uint8_t*)string_slot->ptr);
+        string_slot->len = actual_size;
+    } else if (type_desc.is_string_type()) { // TYPE_OBJECT and TYPE_HLL must be handled before.
+        memcpy(dst, (const void*)(&data_ref), sizeof(data_ref));
+        // Copy the content of string
+        if (padding_char && type_desc.type == TYPE_CHAR) {
+            // serialize the content of string
+            auto string_slot = reinterpret_cast<StringValue*>(dst);
+            string_slot->ptr = reinterpret_cast<char*>(pool->allocate(type_desc.len));
+            string_slot->len = type_desc.len;
+            memset(string_slot->ptr, 0, type_desc.len);
+            memcpy(string_slot->ptr, data_ref.data, data_ref.size);
+        } else {
+            auto str_ptr = pool->allocate(data_ref.size);
+            memcpy(str_ptr, data_ref.data, data_ref.size);
+            auto string_slot = reinterpret_cast<StringValue*>(dst);
+            string_slot->ptr = reinterpret_cast<char*>(str_ptr);
+            string_slot->len = data_ref.size;
+        }
+    } else {
+        memcpy(dst, data_ref.data, data_ref.size);
+    }
+}
+
+MutableBlock::MutableBlock(const std::vector<TupleDescriptor*>& tuple_descs) {
     for (auto tuple_desc : tuple_descs) {
         for (auto slot_desc : tuple_desc->slots()) {
             _data_types.emplace_back(slot_desc->get_data_type_ptr());
@@ -941,4 +924,23 @@ std::unique_ptr<Block> Block::create_same_struct_block(size_t size) const {
     return temp_block;
 }
 
+void Block::shrink_char_type_column_suffix_zero(std::vector<size_t> char_type_idx) {
+    for (auto idx : char_type_idx) {
+        if (this->get_by_position(idx).column->is_nullable()) {
+            this->get_by_position(idx).column = ColumnNullable::create(
+                    reinterpret_cast<const ColumnString*>(
+                            reinterpret_cast<const ColumnNullable*>(
+                                    this->get_by_position(idx).column.get())
+                                    ->get_nested_column_ptr()
+                                    .get())
+                            ->get_shinked_column(),
+                    reinterpret_cast<const ColumnNullable*>(this->get_by_position(idx).column.get())
+                            ->get_null_map_column_ptr());
+        } else {
+            this->get_by_position(idx).column =
+                    reinterpret_cast<const ColumnString*>(this->get_by_position(idx).column.get())
+                            ->get_shinked_column();
+        }
+    }
+}
 } // namespace doris::vectorized

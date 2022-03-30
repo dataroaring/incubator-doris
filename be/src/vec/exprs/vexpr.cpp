@@ -23,15 +23,17 @@
 
 #include "exprs/anyval_util.h"
 #include "gen_cpp/Exprs_types.h"
+#include "vec/data_types/data_type_factory.hpp"
+#include "vec/exprs/varray_literal.h"
 #include "vec/exprs/vcase_expr.h"
 #include "vec/exprs/vcast_expr.h"
 #include "vec/exprs/vcompound_pred.h"
 #include "vec/exprs/vectorized_fn_call.h"
 #include "vec/exprs/vin_predicate.h"
-#include "vec/exprs/vtuple_is_null_predicate.h"
+#include "vec/exprs/vinfo_func.h"
 #include "vec/exprs/vliteral.h"
 #include "vec/exprs/vslot_ref.h"
-#include "vec/exprs/vinfo_func.h"
+#include "vec/exprs/vtuple_is_null_predicate.h"
 
 namespace doris::vectorized {
 using doris::Status;
@@ -46,11 +48,12 @@ VExpr::VExpr(const doris::TExprNode& node)
     if (node.__isset.fn) {
         _fn = node.fn;
     }
+
+    bool is_nullable = true;
     if (node.__isset.is_nullable) {
-        _data_type = IDataType::from_thrift(_type.type, node.is_nullable);
-    } else {
-        _data_type = IDataType::from_thrift(_type.type);
+        is_nullable = node.is_nullable;
     }
+    _data_type = DataTypeFactory::instance().create_data_type(_type, is_nullable);
 }
 
 VExpr::VExpr(const TypeDescriptor& type, bool is_slotref, bool is_nullable)
@@ -58,7 +61,8 @@ VExpr::VExpr(const TypeDescriptor& type, bool is_slotref, bool is_nullable)
     if (is_slotref) {
         _node_type = TExprNodeType::SLOT_REF;
     }
-    _data_type = IDataType::from_thrift(_type.type, is_nullable);
+
+    _data_type = DataTypeFactory::instance().create_data_type(_type, is_nullable);
 }
 
 Status VExpr::prepare(RuntimeState* state, const RowDescriptor& row_desc, VExprContext* context) {
@@ -95,6 +99,10 @@ Status VExpr::create_expr(doris::ObjectPool* pool, const doris::TExprNode& texpr
     case TExprNodeType::STRING_LITERAL:
     case TExprNodeType::NULL_LITERAL: {
         *expr = pool->add(new VLiteral(texpr_node));
+        return Status::OK();
+    }
+    case TExprNodeType::ARRAY_LITERAL: {
+        *expr = pool->add(new VArrayLiteral(texpr_node));
         return Status::OK();
     }
     case doris::TExprNodeType::SLOT_REF: {

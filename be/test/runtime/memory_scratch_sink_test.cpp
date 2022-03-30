@@ -71,16 +71,16 @@ public:
         config::periodic_counter_update_period_ms = 500;
         config::storage_root_path = "./data";
 
-        system("mkdir -p ./test_run/output/");
-        system("pwd");
-        system("cp -r ./be/test/runtime/test_data/ ./test_run/.");
+        ASSERT_EQ(system("mkdir -p ./test_run/output/"), 0);
+        ASSERT_EQ(system("pwd"), 0);
+        ASSERT_EQ(system("cp -r ./be/test/runtime/test_data/ ./test_run/."), 0);
 
         init();
     }
 
     virtual void TearDown() {
         _obj_pool.clear();
-        system("rm -rf ./test_run");
+        ASSERT_EQ(system("rm -rf ./test_run"), 0);
     }
 
     void init();
@@ -226,8 +226,7 @@ TEST_F(MemoryScratchSinkTest, work_flow_normal) {
     status = scan_node.open(_state);
     ASSERT_TRUE(status.ok());
 
-    std::unique_ptr<MemTracker> mem_tracker(new MemTracker(-1));
-    RowBatch row_batch(scan_node._row_descriptor, _state->batch_size(), mem_tracker.get());
+    RowBatch row_batch(scan_node._row_descriptor, _state->batch_size());
     bool eos = false;
 
     while (!eos) {

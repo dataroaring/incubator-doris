@@ -57,6 +57,9 @@ Usage: $0 <shell_options> <framework_options>
      -h                                **print all framework options usage**
      -genOut                           generate .out file if not exist
      -forceGenOut                      delete and generate .out file if not exist
+     -parallel                         run tests using specified threads
+     -randomOrder                      run tests in a random order
+     -times                            rum tests {times} times
 
   Eg.
     $0                                 build regression test framework and run all suite which in default group
@@ -171,6 +174,7 @@ echo "===== Run Regression Test ====="
 $JAVA -DDORIS_HOME=$DORIS_HOME \
       -DLOG_PATH=$LOG_OUTPUT_FILE \
       -Dlogback.configurationFile=${LOG_CONFIG_FILE} \
+      -Xmx2048m \
       -jar ${RUN_JAR} \
       -cf ${CONFIG_FILE} \
       ${REGRESSION_OPTIONS_PREFIX} "$@"

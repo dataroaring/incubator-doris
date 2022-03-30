@@ -160,6 +160,10 @@ public class Column implements Writable {
     public void createChildrenColumn(Type type, Column column) {
         if (type.isArrayType()) {
             Column c = new Column(COLUMN_ARRAY_CHILDREN, ((ArrayType) type).getItemType());
+            // TODO We always set the item type in array nullable.
+            //  We may provide an alternative to configure this property of
+            //  the item type in array in future.
+            c.setIsAllowNull(true);
             column.addChildrenColumn(c);
         }
     }
@@ -341,7 +345,6 @@ public class Column implements Writable {
         tColumn.setIsAllowNull(this.isAllowNull);
         tColumn.setDefaultValue(this.defaultValue);
         tColumn.setVisible(visible);
-        tColumn.setChildrenColumn(new ArrayList<>());
         toChildrenThrift(this, tColumn);
         
         // ATTN:
@@ -369,7 +372,15 @@ public class Column implements Writable {
 
             childrenTColumnType.setIndexLen(children.getOlapColumnIndexSize());
             childrenTColumn.setColumnType(childrenTColumnType);
+            childrenTColumn.setIsAllowNull(children.isAllowNull());
+            // TODO: If we don't set the aggregate type for children, the type will be
+            //  considered as TAggregationType::SUM after deserializing in BE.
+            //  For now, we make children inherit the aggregate type from their parent.
+            if (tColumn.getAggregationType() != null) {
+                childrenTColumn.setAggregationType(tColumn.getAggregationType());
+            }
 
+            tColumn.setChildrenColumn(new ArrayList<>());
             tColumn.children_column.add(childrenTColumn);
 
             toChildrenThrift(children, childrenTColumn);

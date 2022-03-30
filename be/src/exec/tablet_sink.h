@@ -100,7 +100,7 @@ public:
     void addSuccessHandler(std::function<void(const T&, bool)> fn) { success_handler = fn; }
 
     void join() {
-        if (cid != INVALID_BTHREAD_ID) {
+        if (cid != INVALID_BTHREAD_ID && _packet_in_flight) {
             brpc::Join(cid);
         }
     }
@@ -170,7 +170,7 @@ public:
     // two ways to stop channel:
     // 1. mark_close()->close_wait() PS. close_wait() will block waiting for the last AddBatch rpc response.
     // 2. just cancel()
-    Status mark_close();
+    void mark_close();
     Status close_wait(RuntimeState* state);
 
     void cancel(const std::string& cancel_msg);
@@ -180,9 +180,10 @@ public:
     // 1: running, haven't reach eos.
     // only allow 1 rpc in flight
     // plz make sure, this func should be called after open_wait().
-    int try_send_and_fetch_status(std::unique_ptr<ThreadPoolToken>& thread_pool_token);
+    int try_send_and_fetch_status(RuntimeState* state,
+                                  std::unique_ptr<ThreadPoolToken>& thread_pool_token);
 
-    void try_send_batch();
+    void try_send_batch(RuntimeState* state);
 
     void time_report(std::unordered_map<int64_t, AddBatchCounter>* add_batch_counter_map,
                      int64_t* serialize_batch_ns, int64_t* mem_exceeded_block_ns,
@@ -206,7 +207,6 @@ public:
 
     Status none_of(std::initializer_list<bool> vars);
 
-    // TODO(HW): remove after mem tracker shared
     void clear_all_batches();
 
     std::string channel_info() const {
@@ -223,6 +223,8 @@ private:
     int64_t _node_id = -1;
     std::string _load_info;
     std::string _name;
+
+    std::shared_ptr<MemTracker> _node_channel_tracker;
 
     TupleDescriptor* _tuple_desc = nullptr;
     NodeInfo _node_info;
@@ -284,11 +286,24 @@ private:
 
     // the timestamp when this node channel be marked closed and finished closed
     uint64_t _close_time_ms = 0;
+
+    // lock to protect _is_closed.
+    // The methods in the IndexChannel are called back in the RpcClosure in the NodeChannel.
+    // However, this rpc callback may occur after the whole task is finished (e.g. due to network latency),
+    // and by that time the IndexChannel may have been destructured, so we should not call the
+    // IndexChannel methods anymore, otherwise the BE will crash.
+    // Therefore, we use the _is_closed and _closed_lock to ensure that the RPC callback
+    // function will not call the IndexChannel method after the NodeChannel is closed.
+    // The IndexChannel is definitely accessible until the NodeChannel is closed.
+    std::mutex _closed_lock;
+    bool _is_closed = false;
 };
 
 class IndexChannel {
 public:
-    IndexChannel(OlapTableSink* parent, int64_t index_id) : _parent(parent), _index_id(index_id) {}
+    IndexChannel(OlapTableSink* parent, int64_t index_id) : _parent(parent), _index_id(index_id) {
+        _index_channel_tracker = MemTracker::create_tracker(-1, "IndexChannel");
+    }
     ~IndexChannel();
 
     Status init(RuntimeState* state, const std::vector<TTabletWithPartition>& tablets);
@@ -336,6 +351,8 @@ private:
     // key is tablet_id, value is error message
     std::unordered_map<int64_t, std::string> _failed_channels_msgs;
     Status _intolerable_failure_status = Status::OK();
+
+    std::shared_ptr<MemTracker> _index_channel_tracker; // TODO(zxy) use after
 };
 
 // Write data to Olap Table.
@@ -378,7 +395,7 @@ private:
     // the consumer func of sending pending batches in every NodeChannel.
     // use polling & NodeChannel::try_send_and_fetch_status() to achieve nonblocking sending.
     // only focus on pending batches and channel status, the internal errors of NodeChannels will be handled by the producer
-    void _send_batch_process();
+    void _send_batch_process(RuntimeState* state);
 
 protected:
     friend class NodeChannel;
@@ -425,7 +442,7 @@ protected:
     Bitmap _filter_bitmap;
 
     // index_channel
-    std::vector<IndexChannel*> _channels;
+    std::vector<std::shared_ptr<IndexChannel>> _channels;
 
     CountDownLatch _stop_background_threads_latch;
     scoped_refptr<Thread> _sender_thread;

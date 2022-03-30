@@ -129,12 +129,10 @@ public:
     OLAPStatus capture_consistent_rowsets(const Version& spec_version,
                                           std::vector<RowsetSharedPtr>* rowsets) const;
     OLAPStatus capture_rs_readers(const Version& spec_version,
-                                  std::vector<RowsetReaderSharedPtr>* rs_readers,
-                                  std::shared_ptr<MemTracker> parent_tracker = nullptr) const;
+                                  std::vector<RowsetReaderSharedPtr>* rs_readers) const;
 
     OLAPStatus capture_rs_readers(const std::vector<Version>& version_path,
-                                  std::vector<RowsetReaderSharedPtr>* rs_readers,
-                                  std::shared_ptr<MemTracker> parent_tracker = nullptr) const;
+                                  std::vector<RowsetReaderSharedPtr>* rs_readers) const;
 
     DelPredicateArray delete_predicates() { return _tablet_meta->delete_predicates(); }
     void add_delete_predicate(const DeletePredicatePB& delete_predicate, int64_t version);
@@ -143,23 +141,13 @@ public:
 
     // meta lock
     inline std::shared_mutex& get_header_lock() { return _meta_lock; }
-
-    // ingest lock
-    inline void obtain_push_lock() { _ingest_lock.lock(); }
-    inline void release_push_lock() { _ingest_lock.unlock(); }
-    inline Mutex* get_push_lock() { return &_ingest_lock; }
-
-    // base lock
-    inline void obtain_base_compaction_lock() { _base_lock.lock(); }
-    inline void release_base_compaction_lock() { _base_lock.unlock(); }
-    inline Mutex* get_base_lock() { return &_base_lock; }
-
-    // cumulative lock
-    inline void obtain_cumulative_lock() { _cumulative_lock.lock(); }
-    inline void release_cumulative_lock() { _cumulative_lock.unlock(); }
-    inline Mutex* get_cumulative_lock() { return &_cumulative_lock; }
+    inline std::mutex& get_push_lock() { return _ingest_lock; }
+    inline std::mutex& get_base_compaction_lock() { return _base_compaction_lock; }
+    inline std::mutex& get_cumulative_compaction_lock() { return _cumulative_compaction_lock; }
 
     inline std::shared_mutex& get_migration_lock() { return _migration_lock; }
+
+    inline std::mutex& get_schema_change_lock() { return _schema_change_lock; }
 
     // operation for compaction
     bool can_do_compaction(size_t path_hash, CompactionType compaction_type);
@@ -246,8 +234,7 @@ public:
     double calculate_scan_frequency();
 
     Status prepare_compaction_and_calculate_permits(CompactionType compaction_type,
-                                                    TabletSharedPtr tablet,
-                                                    int64_t* permits);
+                                                    TabletSharedPtr tablet, int64_t* permits);
     void execute_compaction(CompactionType compaction_type);
     void reset_compaction(CompactionType compaction_type);
 
@@ -263,7 +250,10 @@ public:
         return _cumulative_compaction_policy;
     }
 
-    inline bool all_beta() const { return _tablet_meta->all_beta(); }
+    inline bool all_beta() const {
+        ReadLock rdlock(_meta_lock);
+        return _tablet_meta->all_beta();
+    }
 
 private:
     OLAPStatus _init_once_action();
@@ -274,7 +264,8 @@ private:
     // Returns:
     // version: the max continuous version from beginning
     // max_version: the max version of this tablet
-    void _max_continuous_version_from_beginning_unlocked(Version* version, Version* max_version) const;
+    void _max_continuous_version_from_beginning_unlocked(Version* version,
+                                                         Version* max_version) const;
     RowsetSharedPtr _rowset_with_largest_size();
     /// Delete stale rowset by version. This method not only delete the version in expired rowset map,
     /// but also delete the version in rowset meta vector.
@@ -300,9 +291,10 @@ private:
     // meta store lock is used for prevent 2 threads do checkpoint concurrently
     // it will be used in econ-mode in the future
     std::shared_mutex _meta_store_lock;
-    Mutex _ingest_lock;
-    Mutex _base_lock;
-    Mutex _cumulative_lock;
+    std::mutex _ingest_lock;
+    std::mutex _base_compaction_lock;
+    std::mutex _cumulative_compaction_lock;
+    std::mutex _schema_change_lock;
     std::shared_mutex _migration_lock;
 
     // TODO(lingbin): There is a _meta_lock TabletMeta too, there should be a comment to

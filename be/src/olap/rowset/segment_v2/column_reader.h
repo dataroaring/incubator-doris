@@ -72,8 +72,6 @@ struct ColumnIteratorOptions {
     // INDEX_PAGE including index_page, dict_page and short_key_page
     PageTypePB type;
 
-    std::shared_ptr<MemTracker> mem_tracker;
-
     void sanity_check() const {
         CHECK_NOTNULL(rblock);
         CHECK_NOTNULL(stats);
@@ -130,6 +128,8 @@ public:
     Status get_row_ranges_by_bloom_filter(CondColumn* cond_column, RowRanges* row_ranges);
 
     PagePointer get_dict_page_pointer() const { return _meta.dict_page(); }
+
+    inline bool is_empty() const { return _num_rows == 0; }
 
 private:
     ColumnReader(const ColumnReaderOptions& opts, const ColumnMetaPB& meta, uint64_t num_rows,
@@ -198,7 +198,6 @@ public:
     virtual ~ColumnIterator() = default;
 
     virtual Status init(const ColumnIteratorOptions& opts) {
-        DCHECK(opts.mem_tracker.get() != nullptr);
         _opts = opts;
         return Status::OK();
     }
@@ -304,6 +303,17 @@ private:
     ordinal_t _current_ordinal = 0;
 
     std::unique_ptr<StringRef[]> _dict_word_info;
+};
+
+class EmptyFileColumnIterator final : public ColumnIterator {
+public:
+    Status seek_to_first() override { return Status::OK(); }
+    Status seek_to_ordinal(ordinal_t ord) override { return Status::OK(); }
+    Status next_batch(size_t* n, ColumnBlockView* dst, bool* has_null) override {
+        *n = 0;
+        return Status::OK();
+    }
+    ordinal_t get_current_ordinal() const override { return 0; }
 };
 
 class ArrayFileColumnIterator final : public ColumnIterator {

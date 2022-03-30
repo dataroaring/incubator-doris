@@ -216,6 +216,7 @@ void RawValue::print_value(const void* value, const TypeDescriptor& type, int sc
     case TYPE_VARCHAR:
     case TYPE_OBJECT:
     case TYPE_HLL:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         string_val = reinterpret_cast<const StringValue*>(value);
         std::stringstream ss;
@@ -296,6 +297,7 @@ void RawValue::write(const void* value, void* dst, const TypeDescriptor& type, M
 
     case TYPE_OBJECT:
     case TYPE_HLL:
+    case TYPE_QUANTILE_STATE:
     case TYPE_VARCHAR:
     case TYPE_CHAR:
     case TYPE_STRING: {
@@ -319,17 +321,18 @@ void RawValue::write(const void* value, void* dst, const TypeDescriptor& type, M
         CollectionValue* val = reinterpret_cast<CollectionValue*>(dst);
 
         if (pool != nullptr) {
-            auto children_type = type.children.at(0).type;
-            CollectionValue::init_collection(pool, src->size(), children_type, val);
-            ArrayIterator src_iter = src->iterator(children_type);
-            ArrayIterator val_iter = val->iterator(children_type);
+            const auto& item_type = type.children[0];
+            CollectionValue::init_collection(pool, src->size(), item_type.type, val);
+            ArrayIterator src_iter = src->iterator(item_type.type);
+            ArrayIterator val_iter = val->iterator(item_type.type);
 
+            val->set_has_null(src->has_null());
             val->copy_null_signs(src);
 
             while (src_iter.has_next() && val_iter.has_next()) {
                 if (!src_iter.is_null()) {
                     // write children
-                    write(src_iter.value(), val_iter.value(), children_type, pool);
+                    write(src_iter.value(), val_iter.value(), item_type, pool);
                 }
                 src_iter.next();
                 val_iter.next();

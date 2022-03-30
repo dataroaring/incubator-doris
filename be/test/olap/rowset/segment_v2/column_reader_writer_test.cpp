@@ -147,7 +147,6 @@ void test_nullable_data(uint8_t* src_data, uint8_t* src_is_null, int num_rows,
             OlapReaderStatistics stats;
             iter_opts.stats = &stats;
             iter_opts.rblock = rblock.get();
-            iter_opts.mem_tracker = std::make_shared<MemTracker>();
             st = iter->init(iter_opts);
             ASSERT_TRUE(st.ok());
 
@@ -208,7 +207,6 @@ void test_nullable_data(uint8_t* src_data, uint8_t* src_is_null, int num_rows,
             OlapReaderStatistics stats;
             iter_opts.stats = &stats;
             iter_opts.rblock = rblock.get();
-            iter_opts.mem_tracker = std::make_shared<MemTracker>();
             st = iter->init(iter_opts);
             ASSERT_TRUE(st.ok());
 
@@ -334,7 +332,6 @@ void test_array_nullable_data(CollectionValue* src_data, uint8_t* src_is_null, i
         OlapReaderStatistics stats;
         iter_opts.stats = &stats;
         iter_opts.rblock = rblock.get();
-        iter_opts.mem_tracker = std::make_shared<MemTracker>();
         st = iter->init(iter_opts);
         ASSERT_TRUE(st.ok());
         // sequence read
@@ -470,7 +467,6 @@ void test_read_default_value(string value, void* result) {
                                         tablet_column.default_value(), tablet_column.is_nullable(),
                                         type_info, tablet_column.length());
         ColumnIteratorOptions iter_opts;
-        iter_opts.mem_tracker = std::make_shared<MemTracker>();
         auto st = iter.init(iter_opts);
         ASSERT_TRUE(st.ok());
         // sequence read
@@ -582,7 +578,6 @@ void test_v_read_default_value(string value, void* result) {
                                         tablet_column.default_value(), tablet_column.is_nullable(),
                                         type_info, tablet_column.length());
         ColumnIteratorOptions iter_opts;
-        iter_opts.mem_tracker = std::make_shared<MemTracker>();
         auto st = iter.init(iter_opts);
         ASSERT_TRUE(st.ok());
 
@@ -819,6 +814,30 @@ TEST_F(ColumnReaderWriterTest, test_v_default_value) {
     std::string v_decimal("102418.000000002");
     decimal12_t decimal = {102418, 2};
     test_v_read_default_value<OLAP_FIELD_TYPE_DECIMAL>(v_decimal, &decimal);
+}
+
+TEST_F(ColumnReaderWriterTest, test_single_empty_array) {
+    size_t num_array = 1;
+    std::unique_ptr<uint8_t[]> array_is_null(new uint8_t[BitmapSize(num_array)]());
+    CollectionValue array(0);
+    test_array_nullable_data<OLAP_FIELD_TYPE_TINYINT, BIT_SHUFFLE, BIT_SHUFFLE>(
+            &array, array_is_null.get(), num_array, "test_single_empty_array");
+}
+
+TEST_F(ColumnReaderWriterTest, test_mixed_empty_arrays) {
+    size_t num_array = 3;
+    std::unique_ptr<uint8_t[]> array_is_null(new uint8_t[BitmapSize(num_array)]());
+    std::unique_ptr<CollectionValue[]> collection_values(new CollectionValue[num_array]);
+    int data[] = {1, 2, 3};
+    for (int i = 0; i < num_array; ++ i) {
+        if (i % 2 == 1) {
+            new (&collection_values[i]) CollectionValue(0);
+        } else {
+            new (&collection_values[i]) CollectionValue(&data, 3, false, nullptr);
+        }
+    }
+    test_array_nullable_data<OLAP_FIELD_TYPE_INT, BIT_SHUFFLE, BIT_SHUFFLE>(
+            collection_values.get(), array_is_null.get(), num_array, "test_mixed_empty_arrays");
 }
 
 } // namespace segment_v2

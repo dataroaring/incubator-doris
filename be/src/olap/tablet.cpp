@@ -580,7 +580,7 @@ OLAPStatus Tablet::capture_consistent_versions(const Version& spec_version,
 
 OLAPStatus Tablet::check_version_integrity(const Version& version, bool quiet) {
     ReadLock rdlock(_meta_lock);
-    return capture_consistent_versions(version, nullptr);
+    return capture_consistent_versions(version, nullptr, quiet);
 }
 
 // If any rowset contains the specific version, it means the version already exist
@@ -640,17 +640,15 @@ OLAPStatus Tablet::_capture_consistent_rowsets_unlocked(
 }
 
 OLAPStatus Tablet::capture_rs_readers(const Version& spec_version,
-                                      std::vector<RowsetReaderSharedPtr>* rs_readers,
-                                      std::shared_ptr<MemTracker> parent_tracker) const {
+                                      std::vector<RowsetReaderSharedPtr>* rs_readers) const {
     std::vector<Version> version_path;
     RETURN_NOT_OK(capture_consistent_versions(spec_version, &version_path));
-    RETURN_NOT_OK(capture_rs_readers(version_path, rs_readers, parent_tracker));
+    RETURN_NOT_OK(capture_rs_readers(version_path, rs_readers));
     return OLAP_SUCCESS;
 }
 
 OLAPStatus Tablet::capture_rs_readers(const std::vector<Version>& version_path,
-                                      std::vector<RowsetReaderSharedPtr>* rs_readers,
-                                      std::shared_ptr<MemTracker> parent_tracker) const {
+                                      std::vector<RowsetReaderSharedPtr>* rs_readers) const {
     DCHECK(rs_readers != nullptr && rs_readers->empty());
     for (auto version : version_path) {
         auto it = _rs_version_map.find(version);
@@ -667,7 +665,7 @@ OLAPStatus Tablet::capture_rs_readers(const std::vector<Version>& version_path,
             }
         }
         RowsetReaderSharedPtr rs_reader;
-        auto res = it->second->create_reader(parent_tracker, &rs_reader);
+        auto res = it->second->create_reader(&rs_reader);
         if (res != OLAP_SUCCESS) {
             LOG(WARNING) << "failed to create reader for rowset:" << it->second->rowset_id();
             return OLAP_ERR_CAPTURE_ROWSET_READER_ERROR;
@@ -840,7 +838,7 @@ void Tablet::_max_continuous_version_from_beginning_unlocked(Version* version, V
 }
 
 void Tablet::calculate_cumulative_point() {
-    ReadLock wrlock(_meta_lock);
+    WriteLock wrlock(_meta_lock);
     int64_t ret_cumulative_point;
     _cumulative_compaction_policy->calculate_cumulative_point(
             this, _tablet_meta->all_rs_metas(), _cumulative_point, &ret_cumulative_point);

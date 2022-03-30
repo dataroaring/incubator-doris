@@ -27,8 +27,13 @@ class TExprNode;
 namespace vectorized {
 class VLiteral : public VExpr {
 public:
-    virtual ~VLiteral();
-    VLiteral(const TExprNode& node);
+    VLiteral(const TExprNode& node, bool should_init = true)
+            : VExpr(node), _expr_name(_data_type->get_name()) {
+        if (should_init) {
+            init(node);
+        }
+    };
+    virtual ~VLiteral() = default;
     virtual Status execute(VExprContext* context, vectorized::Block* block,
                            int* result_column_id) override;
     virtual const std::string& expr_name() const override { return _expr_name; }
@@ -36,9 +41,12 @@ public:
         return pool->add(new VLiteral(*this));
     }
 
-private:
+protected:
     ColumnPtr _column_ptr;
     std::string _expr_name;
+
+private:
+    void init(const TExprNode& node);
 };
 } // namespace vectorized
 

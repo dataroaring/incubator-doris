@@ -28,10 +28,10 @@
 #include "runtime/large_int_value.h"
 #include "runtime/string_value.h"
 #include "udf/udf.h"
-
 #include "vec/columns/column_decimal.h"
 #include "vec/columns/column_string.h"
 #include "vec/columns/columns_number.h"
+#include "vec/common/string_ref.h"
 #include "vec/core/types.h"
 #include "vec/runtime/vdatetime_value.h"
 
@@ -62,9 +62,10 @@ enum PrimitiveType {
     TYPE_HLL,       /* 19 */
     TYPE_DECIMALV2, /* 20 */
 
-    TYPE_TIME,   /* 21 */
-    TYPE_OBJECT, /* 22 */
-    TYPE_STRING, /* 23 */
+    TYPE_TIME,          /* 21 */
+    TYPE_OBJECT,        /* 22 */
+    TYPE_STRING,        /* 23 */
+    TYPE_QUANTILE_STATE /* 24 */
 };
 
 inline PrimitiveType convert_type_to_primitive(FunctionContext::Type type) {
@@ -93,6 +94,8 @@ inline PrimitiveType convert_type_to_primitive(FunctionContext::Type type) {
         return PrimitiveType::TYPE_OBJECT;
     case FunctionContext::Type::TYPE_HLL:
         return PrimitiveType::TYPE_HLL;
+    case FunctionContext::Type::TYPE_QUANTILE_STATE:
+        return PrimitiveType::TYPE_QUANTILE_STATE;
     case FunctionContext::Type::TYPE_TINYINT:
         return PrimitiveType::TYPE_TINYINT;
     case FunctionContext::Type::TYPE_SMALLINT:
@@ -151,13 +154,15 @@ inline bool is_string_type(PrimitiveType type) {
 }
 
 inline bool has_variable_type(PrimitiveType type) {
-    return type == TYPE_CHAR || type == TYPE_VARCHAR || type == TYPE_OBJECT || type == TYPE_STRING;
+    return type == TYPE_CHAR || type == TYPE_VARCHAR || type == TYPE_OBJECT ||
+           type == TYPE_QUANTILE_STATE || type == TYPE_STRING;
 }
 
 // Returns the byte size of 'type'  Returns 0 for variable length types.
 inline int get_byte_size(PrimitiveType type) {
     switch (type) {
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_HLL:
     case TYPE_VARCHAR:
     case TYPE_STRING:
@@ -198,6 +203,7 @@ inline int get_byte_size(PrimitiveType type) {
 inline int get_real_byte_size(PrimitiveType type) {
     switch (type) {
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_HLL:
     case TYPE_VARCHAR:
     case TYPE_STRING:
@@ -242,7 +248,7 @@ int get_slot_size(PrimitiveType type);
 inline bool is_type_compatible(PrimitiveType lhs, PrimitiveType rhs) {
     if (lhs == TYPE_VARCHAR) {
         return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL || rhs == TYPE_OBJECT ||
-               rhs == TYPE_STRING;
+               rhs == TYPE_QUANTILE_STATE || rhs == TYPE_STRING;
     }
 
     if (lhs == TYPE_OBJECT) {
@@ -256,6 +262,10 @@ inline bool is_type_compatible(PrimitiveType lhs, PrimitiveType rhs) {
     if (lhs == TYPE_STRING) {
         return rhs == TYPE_CHAR || rhs == TYPE_VARCHAR || rhs == TYPE_HLL || rhs == TYPE_OBJECT ||
                rhs == TYPE_STRING;
+    }
+
+    if (lhs == TYPE_QUANTILE_STATE) {
+        return rhs == TYPE_VARCHAR || rhs == TYPE_QUANTILE_STATE || rhs == TYPE_STRING;
     }
 
     return lhs == rhs;
@@ -348,6 +358,27 @@ template <>
 struct PrimitiveTypeTraits<TYPE_STRING> {
     using CppType = StringValue;
     using ColumnType = vectorized::ColumnString;
+};
+
+// only for adapt get_predicate_column_ptr
+template <PrimitiveType type>
+struct PredicatePrimitiveTypeTraits {
+    using PredicateFieldType = typename PrimitiveTypeTraits<type>::CppType;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DECIMALV2> {
+    using PredicateFieldType = decimal12_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATE> {
+    using PredicateFieldType = uint24_t;
+};
+
+template <>
+struct PredicatePrimitiveTypeTraits<TYPE_DATETIME> {
+    using PredicateFieldType = uint64_t;
 };
 
 } // namespace doris

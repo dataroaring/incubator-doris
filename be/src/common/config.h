@@ -187,8 +187,8 @@ CONF_mInt32(push_write_mbytes_per_sec, "100");
 
 CONF_mInt64(column_dictionary_key_ratio_threshold, "0");
 CONF_mInt64(column_dictionary_key_size_threshold, "0");
-// memory_limitation_per_thread_for_schema_change unit GB
-CONF_mInt32(memory_limitation_per_thread_for_schema_change, "2");
+// memory_limitation_per_thread_for_schema_change_bytes unit bytes
+CONF_mInt64(memory_limitation_per_thread_for_schema_change_bytes, "2147483648");
 
 // the clean interval of file descriptor cache and segment cache
 CONF_mInt32(cache_clean_interval, "1800");
@@ -233,6 +233,8 @@ CONF_Int32(index_page_cache_percentage, "10");
 CONF_Bool(disable_storage_page_cache, "false");
 
 CONF_Bool(enable_storage_vectorization, "false");
+
+CONF_Bool(enable_low_cardinality_optimize, "false");
 
 // be policy
 // whether disable automatic compaction task
@@ -330,6 +332,11 @@ CONF_Int32(min_tablet_migration_threads, "1");
 CONF_Int32(max_tablet_migration_threads, "1");
 
 CONF_mInt32(finished_migration_tasks_size, "10000");
+// If size less than this, the remaining rowsets will be force to complete
+CONF_mInt32(migration_remaining_size_threshold_mb, "10");
+// If the task runs longer than this time, the task will be terminated, in seconds.
+// tablet max size / migration min speed * factor = 10GB / 1MBps * 2 = 20480 seconds
+CONF_mInt32(migration_task_timeout_secs, "20480");
 
 // Port to start debug webserver on
 CONF_Int32(webserver_port, "8040");
@@ -604,6 +611,9 @@ CONF_Int32(aws_log_level, "3");
 // the buffer size when read data from remote storage like s3
 CONF_mInt32(remote_storage_read_buffer_mb, "16");
 
+// Whether Hook TCmalloc new/delete, currently consume/release tls mem tracker in Hook.
+CONF_Bool(track_new_delete, "true");
+
 // Default level of MemTracker to show in web page
 // now MemTracker support two level:
 //      OVERVIEW: 0
@@ -714,6 +724,13 @@ CONF_String(function_service_protocol, "h2:grpc");
 
 // use which load balancer to select server to connect
 CONF_String(rpc_load_balancer, "rr");
+
+// a soft limit of string type length, the hard limit is 2GB - 4, but if too long will cause very low performance,
+// so we set a soft limit, default is 1MB
+CONF_mInt32(string_type_length_soft_limit_bytes, "1048576");
+
+CONF_Validator(string_type_length_soft_limit_bytes,
+               [](const int config) -> bool { return config > 0 && config <= 2147483643; });
 
 } // namespace config
 

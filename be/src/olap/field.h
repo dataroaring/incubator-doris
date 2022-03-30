@@ -85,7 +85,7 @@ public:
 
     inline void agg_update(RowCursorCell* dest, const RowCursorCell& src,
                            MemPool* mem_pool = nullptr) const {
-        if (type() == OLAP_FIELD_TYPE_STRING && mem_pool == nullptr) {
+        if (type() == OLAP_FIELD_TYPE_STRING && mem_pool == nullptr && !src.is_null()) {
             auto dst_slice = reinterpret_cast<Slice*>(dest->mutable_cell_ptr());
             auto src_slice = reinterpret_cast<const Slice*>(src.cell_ptr());
             if (dst_slice->size < src_slice->size) {
@@ -247,7 +247,7 @@ public:
     // used by init scan key stored in string format
     // value_string should end with '\0'
     inline OLAPStatus from_string(char* buf, const std::string& value_string) const {
-        if (type() == OLAP_FIELD_TYPE_STRING) {
+        if (type() == OLAP_FIELD_TYPE_STRING && !value_string.empty()) {
             auto slice = reinterpret_cast<Slice*>(buf);
             if (slice->size < value_string.size()) {
                 *_long_text_buf = static_cast<char*>(realloc(*_long_text_buf, value_string.size()));
@@ -298,7 +298,8 @@ public:
     void add_sub_field(std::unique_ptr<Field> sub_field) {
         _sub_fields.emplace_back(std::move(sub_field));
     }
-    Field* get_sub_field(int i) { return _sub_fields[i].get(); }
+    Field* get_sub_field(int i) const { return _sub_fields[i].get(); }
+    size_t get_sub_field_count() const { return _sub_fields.size(); }
 
 protected:
     std::shared_ptr<const TypeInfo> _type_info;
@@ -453,9 +454,7 @@ public:
 
     char* allocate_memory(char* cell_ptr, char* variable_ptr) const override {
         auto array_v = (CollectionValue*)cell_ptr;
-        array_v->set_null_signs(reinterpret_cast<bool*>(variable_ptr + sizeof(CollectionValue)));
-        array_v->set_data(variable_ptr + sizeof(CollectionValue) +
-                          OLAP_ARRAY_MAX_BYTES / sizeof(char*));
+        array_v->set_null_signs(reinterpret_cast<bool*>(variable_ptr));
         return variable_ptr + _length;
     }
 
@@ -676,6 +675,30 @@ public:
     }
 };
 
+class QuantileStateAggField : public Field {
+public:
+    explicit QuantileStateAggField() : Field() {}
+    explicit QuantileStateAggField(const TabletColumn& column) : Field(column) {}
+
+    // quantile_state storage data always not null
+    void agg_init(RowCursorCell* dst, const RowCursorCell& src, MemPool* mem_pool,
+                  ObjectPool* agg_pool) const override {
+        _agg_info->init(dst, (const char*)src.cell_ptr(), false, mem_pool, agg_pool);
+    }
+
+    char* allocate_memory(char* cell_ptr, char* variable_ptr) const override {
+        auto slice = (Slice*)cell_ptr;
+        slice->data = nullptr;
+        return variable_ptr;
+    }
+
+    QuantileStateAggField* clone() const override {
+        auto* local = new QuantileStateAggField();
+        Field::clone(local);
+        return local;
+    }
+};
+
 class HllAggField : public Field {
 public:
     explicit HllAggField() : Field() {}
@@ -751,6 +774,8 @@ public:
             return new HllAggField(column);
         case OLAP_FIELD_AGGREGATION_BITMAP_UNION:
             return new BitmapAggField(column);
+        case OLAP_FIELD_AGGREGATION_QUANTILE_UNION:
+            return new QuantileStateAggField(column);
         case OLAP_FIELD_AGGREGATION_UNKNOWN:
             LOG(WARNING) << "WOW! value column agg type is unknown";
             return nullptr;

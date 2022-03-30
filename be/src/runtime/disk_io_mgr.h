@@ -25,7 +25,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "common/atomic.h"
 #include "common/config.h"
 #include "common/object_pool.h"
 #include "common/status.h"
@@ -237,13 +236,18 @@ public:
         int64_t buffer_len() { return _buffer_len; }
         int64_t len() { return _len; }
         bool eosr() { return _eosr; }
+        MemTracker* buffer_mem_tracker() { return _buffer_mem_tracker; }
 
         // Returns the offset within the scan range that this buffer starts at
         int64_t scan_range_offset() const { return _scan_range_offset; }
 
-        // Updates this buffer to be owned by the new tracker. Consumption is
-        // release from the current tracker and added to the new one.
-        void set_mem_tracker(std::shared_ptr<MemTracker> tracker);
+        // Updates this buffer to be owned by the new tracker.
+        // Transfer memory ownership between two trackers.
+        void update_mem_tracker(MemTracker* tracker);
+
+        // To set a tracker, make sure that in an external location,
+        // the desc buffer's memory must have transferred ownership,
+        void set_mem_tracker(MemTracker* tracker);
 
         // Returns the buffer to the IoMgr. This must be called for every buffer
         // returned by get_next()/read() that did not return an error. This is non-blocking.
@@ -263,7 +267,7 @@ public:
         RequestContext* _reader;
 
         // The current tracker this buffer is associated with.
-        std::shared_ptr<MemTracker> _mem_tracker;
+        MemTracker* _buffer_mem_tracker;
 
         // Scan range that this buffer is for.
         ScanRange* _scan_range;
@@ -440,6 +444,7 @@ public:
 
         // If non-null, this is DN cached buffer. This means the cached read succeeded
         // and all the bytes for the range are in this buffer.
+        // TODO(zxy) Not used, maybe delete
         struct hadoopRzBuffer* _cached_buffer;
 
         // Lock protecting fields below.
@@ -746,10 +751,10 @@ private:
     std::list<BufferDescriptor*> _free_buffer_descs;
 
     // Total number of allocated buffers, used for debugging.
-    AtomicInt<int> _num_allocated_buffers;
+    std::atomic<int> _num_allocated_buffers {0};
 
     // Total number of buffers in readers
-    AtomicInt<int> _num_buffers_in_readers;
+    std::atomic<int> _num_buffers_in_readers {0};
 
     // Per disk queues. This is static and created once at init() time.  One queue is
     // allocated for each local disk on the system and for each remote filesystem type.
@@ -793,7 +798,7 @@ private:
     // Returns a buffer to the free list. buffer_size / _min_buffer_size should be a power
     // of 2, and buffer_size should be <= _max_buffer_size. These constraints will be met
     // if buffer was acquired via get_free_buffer() (which it should have been).
-    void return_free_buffer(char* buffer, int64_t buffer_size);
+    void return_free_buffer(char* buffer, int64_t buffer_size, MemTracker* tracker);
 
     // Returns the buffer in desc (cannot be nullptr), sets buffer to nullptr and clears the
     // mem tracker.
@@ -802,7 +807,7 @@ private:
     // Disk worker thread loop. This function retrieves the next range to process on
     // the disk queue and invokes read_range() or Write() depending on the type of Range().
     // There can be multiple threads per disk running this loop.
-    void work_loop(DiskQueue* queue);
+    void work_loop(DiskQueue* queue, const std::shared_ptr<MemTracker>& mem_tracker);
 
     // This is called from the disk thread to get the next range to process. It will
     // wait until a scan range and buffer are available, or a write range is available.
