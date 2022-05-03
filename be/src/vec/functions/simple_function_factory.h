@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 
+#include "exprs/table_function/table_function.h"
 #include "vec/functions/function.h"
 
 namespace doris::vectorized {
@@ -74,6 +75,7 @@ void register_function_convert_tz(SimpleFunctionFactory& factory);
 void register_function_least_greast(SimpleFunctionFactory& factory);
 void register_function_fake(SimpleFunctionFactory& factory);
 void register_function_array(SimpleFunctionFactory& factory);
+void register_geo_functions(SimpleFunctionFactory& factory);
 
 void register_function_encryption(SimpleFunctionFactory& factory);
 void register_function_regexp_extract(SimpleFunctionFactory& factory);
@@ -102,10 +104,16 @@ public:
 
     template <class Function>
     void register_function() {
-        if constexpr (std::is_base_of<IFunction, Function>::value)
+        if constexpr (std::is_base_of<IFunction, Function>::value) {
             register_function(Function::name, &createDefaultFunction<Function>);
-        else
+        } else {
             register_function(Function::name, &Function::create);
+        }
+    }
+
+    template <class Function>
+    void register_function(std::string name) {
+        function_creators[name] = &createDefaultFunction<Function>;
     }
 
     void register_alias(const std::string& name, const std::string& alias) {
@@ -202,6 +210,7 @@ public:
             register_function_regexp_extract(instance);
             register_function_hex_variadic(instance);
             register_function_array(instance);
+            register_geo_functions(instance);
         });
         return instance;
     }

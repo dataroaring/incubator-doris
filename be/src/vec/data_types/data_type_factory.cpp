@@ -20,6 +20,8 @@
 
 #include "vec/data_types/data_type_factory.hpp"
 
+#include "vec/data_types/data_type_hll.h"
+
 namespace doris::vectorized {
 
 DataTypePtr DataTypeFactory::create_data_type(const doris::Field& col_desc) {
@@ -161,7 +163,7 @@ DataTypePtr DataTypeFactory::_create_primitive_data_type(const FieldType& type) 
         break;
     case OLAP_FIELD_TYPE_HLL:
         result = std::make_shared<vectorized::DataTypeHLL>();
-        break;        
+        break;
     case OLAP_FIELD_TYPE_OBJECT:
         result = std::make_shared<vectorized::DataTypeBitMap>();
         break;
@@ -238,6 +240,9 @@ DataTypePtr DataTypeFactory::create_data_type(const PColumnMeta& pcolumn) {
         break;
     case PGenericType::BITMAP:
         nested = std::make_shared<DataTypeBitMap>();
+        break;
+    case PGenericType::HLL:
+        nested = std::make_shared<DataTypeHLL>();
         break;
     case PGenericType::LIST:
         DCHECK(pcolumn.children_size() == 1);

@@ -40,7 +40,7 @@ using strings::Substitute;
 Status Segment::open(const FilePathDesc& path_desc, uint32_t segment_id,
                      const TabletSchema* tablet_schema, std::shared_ptr<Segment>* output) {
     std::shared_ptr<Segment> segment(new Segment(path_desc, segment_id, tablet_schema));
-    if (!Env::get_env(path_desc.storage_medium)->is_remote_env()) {
+    if (!path_desc.is_remote()) {
         RETURN_IF_ERROR(segment->_open());
     }
     output->swap(segment);
@@ -51,10 +51,9 @@ Segment::Segment(const FilePathDesc& path_desc, uint32_t segment_id,
                  const TabletSchema* tablet_schema)
         : _path_desc(path_desc), _segment_id(segment_id), _tablet_schema(tablet_schema) {
 #ifndef BE_TEST
-    _mem_tracker = MemTracker::create_virtual_tracker(
-            -1, "Segment", StorageEngine::instance()->tablet_mem_tracker());
+    _mem_tracker = StorageEngine::instance()->tablet_mem_tracker();
 #else
-    _mem_tracker = MemTracker::create_virtual_tracker(-1, "Segment");
+    _mem_tracker = MemTracker::get_process_tracker();
 #endif
 }
 
@@ -101,7 +100,7 @@ Status Segment::new_iterator(const Schema& schema, const StorageReadOptions& rea
 Status Segment::_parse_footer() {
     // Footer := SegmentFooterPB, FooterPBSize(4), FooterPBChecksum(4), MagicNumber(4)
     std::unique_ptr<fs::ReadableBlock> rblock;
-    fs::BlockManager* block_mgr = fs::fs_util::block_manager(_path_desc.storage_medium);
+    fs::BlockManager* block_mgr = fs::fs_util::block_manager(_path_desc);
     RETURN_IF_ERROR(block_mgr->open_block(_path_desc, &rblock));
 
     uint64_t file_size;
@@ -155,7 +154,7 @@ Status Segment::_load_index() {
     return _load_index_once.call([this] {
         // read and parse short key index page
         std::unique_ptr<fs::ReadableBlock> rblock;
-        fs::BlockManager* block_mgr = fs::fs_util::block_manager(_path_desc.storage_medium);
+        fs::BlockManager* block_mgr = fs::fs_util::block_manager(_path_desc);
         RETURN_IF_ERROR(block_mgr->open_block(_path_desc, &rblock));
 
         PageReadOptions opts;
@@ -212,7 +211,7 @@ Status Segment::new_column_iterator(uint32_t cid, ColumnIterator** iter) {
         std::unique_ptr<DefaultValueColumnIterator> default_value_iter(
                 new DefaultValueColumnIterator(
                         tablet_column.has_default_value(), tablet_column.default_value(),
-                        tablet_column.is_nullable(), type_info, tablet_column.length()));
+                        tablet_column.is_nullable(), std::move(type_info), tablet_column.length()));
         ColumnIteratorOptions iter_opts;
 
         RETURN_IF_ERROR(default_value_iter->init(iter_opts));

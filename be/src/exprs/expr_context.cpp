@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr-context.cc
+// and modified by Doris
 
 #include "exprs/expr_context.h"
 
@@ -28,6 +31,7 @@
 #include "runtime/mem_tracker.h"
 #include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "udf/udf_internal.h"
 #include "util/debug_util.h"
 #include "util/stack_util.h"
@@ -35,12 +39,7 @@
 namespace doris {
 
 ExprContext::ExprContext(Expr* root)
-        : _fn_contexts_ptr(nullptr),
-          _root(root),
-          _is_clone(false),
-          _prepared(false),
-          _opened(false),
-          _closed(false) {}
+        : _root(root), _is_clone(false), _prepared(false), _opened(false), _closed(false) {}
 
 ExprContext::~ExprContext() {
     DCHECK(!_prepared || _closed);
@@ -53,6 +52,7 @@ Status ExprContext::prepare(RuntimeState* state, const RowDescriptor& row_desc,
                             const std::shared_ptr<MemTracker>& tracker) {
     DCHECK(!_prepared);
     _mem_tracker = tracker;
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
     DCHECK(_pool.get() == nullptr);
     _prepared = true;
     _pool.reset(new MemPool(_mem_tracker.get()));
@@ -64,6 +64,7 @@ Status ExprContext::open(RuntimeState* state) {
     if (_opened) {
         return Status::OK();
     }
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
     _opened = true;
     // Fragment-local state is only initialized for original contexts. Clones inherit the
     // original's fragment state and only need to have thread-local state initialized.
@@ -102,7 +103,6 @@ int ExprContext::register_func(RuntimeState* state,
                                int varargs_buffer_size) {
     _fn_contexts.push_back(FunctionContextImpl::create_context(
             state, _pool.get(), return_type, arg_types, varargs_buffer_size, false));
-    _fn_contexts_ptr = &_fn_contexts[0];
     return _fn_contexts.size() - 1;
 }
 
@@ -110,13 +110,13 @@ Status ExprContext::clone(RuntimeState* state, ExprContext** new_ctx) {
     DCHECK(_prepared);
     DCHECK(_opened);
     DCHECK(*new_ctx == nullptr);
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
 
     *new_ctx = state->obj_pool()->add(new ExprContext(_root));
     (*new_ctx)->_pool.reset(new MemPool(_pool->mem_tracker()));
     for (int i = 0; i < _fn_contexts.size(); ++i) {
         (*new_ctx)->_fn_contexts.push_back(_fn_contexts[i]->impl()->clone((*new_ctx)->_pool.get()));
     }
-    (*new_ctx)->_fn_contexts_ptr = &((*new_ctx)->_fn_contexts[0]);
 
     (*new_ctx)->_is_clone = true;
     (*new_ctx)->_prepared = true;
@@ -130,13 +130,13 @@ Status ExprContext::clone(RuntimeState* state, ExprContext** new_ctx, Expr* root
     DCHECK(_prepared);
     DCHECK(_opened);
     DCHECK(*new_ctx == nullptr);
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
 
     *new_ctx = state->obj_pool()->add(new ExprContext(root));
     (*new_ctx)->_pool.reset(new MemPool(_pool->mem_tracker()));
     for (int i = 0; i < _fn_contexts.size(); ++i) {
         (*new_ctx)->_fn_contexts.push_back(_fn_contexts[i]->impl()->clone((*new_ctx)->_pool.get()));
     }
-    (*new_ctx)->_fn_contexts_ptr = &((*new_ctx)->_fn_contexts[0]);
 
     (*new_ctx)->_is_clone = true;
     (*new_ctx)->_prepared = true;
@@ -147,6 +147,7 @@ Status ExprContext::clone(RuntimeState* state, ExprContext** new_ctx, Expr* root
 }
 
 void ExprContext::free_local_allocations() {
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
     free_local_allocations(_fn_contexts);
 }
 

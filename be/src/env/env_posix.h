@@ -24,7 +24,6 @@ namespace doris {
 class RandomAccessFile;
 class RandomRWFile;
 class WritableFile;
-class SequentialFile;
 struct WritableFileOptions;
 struct RandomAccessFileOptions;
 struct RandomRWFileOptions;
@@ -32,11 +31,6 @@ struct RandomRWFileOptions;
 class PosixEnv : public Env {
 public:
     ~PosixEnv() override {}
-
-    Status init_conf() override;
-
-    Status new_sequential_file(const std::string& fname,
-                               std::unique_ptr<SequentialFile>* result) override;
 
     // get a RandomAccessFile pointer without file cache
     Status new_random_access_file(const std::string& fname,
@@ -93,8 +87,6 @@ public:
     Status link_file(const std::string& old_path, const std::string& new_path) override;
 
     Status get_space_info(const std::string& path, int64_t* capacity, int64_t* available) override;
-
-    bool is_remote_env() override { return false; }
 };
 
 } // namespace doris

@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr-context.h
+// and modified by Doris
 
 #ifndef DORIS_BE_SRC_QUERY_EXPRS_EXPR_CONTEXT_H
 #define DORIS_BE_SRC_QUERY_EXPRS_EXPR_CONTEXT_H
@@ -153,7 +156,7 @@ public:
 private:
     friend class Expr;
     friend class ScalarFnCall;
-    friend class RPCFnCall;
+    friend class RPCFn;
     friend class InPredicate;
     friend class RuntimePredicateWrapper;
     friend class BloomFilterPredicate;
@@ -164,11 +167,6 @@ private:
     /// FunctionContexts for each registered expression. The FunctionContexts are created
     /// and owned by this ExprContext.
     std::vector<FunctionContext*> _fn_contexts;
-
-    /// Array access to fn_contexts_. Used by ScalarFnCall's codegen'd compute function
-    /// to access the correct FunctionContext.
-    /// TODO: revisit this
-    FunctionContext** _fn_contexts_ptr;
 
     // Used to create _pool, if change to raw pointer later, be careful about tracker's life cycle.
     std::shared_ptr<MemTracker> _mem_tracker;

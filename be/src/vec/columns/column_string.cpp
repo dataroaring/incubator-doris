@@ -93,7 +93,8 @@ void ColumnString::insert_range_from(const IColumn& src, size_t start, size_t le
     }
 }
 
-void ColumnString::insert_indices_from(const IColumn& src, const int* indices_begin, const int* indices_end) {
+void ColumnString::insert_indices_from(const IColumn& src, const int* indices_begin,
+                                       const int* indices_end) {
     for (auto x = indices_begin; x != indices_end; ++x) {
         if (*x == -1) {
             ColumnString::insert_default();
@@ -331,7 +332,12 @@ void ColumnString::reserve(size_t n) {
 }
 
 void ColumnString::resize(size_t n) {
-    offsets.resize(n);
+    auto origin_size = size();
+    if (origin_size > n) {
+        offsets.resize(n);
+    } else if (origin_size < n) {
+        insert_many_defaults(n - origin_size);
+    }
 }
 
 void ColumnString::get_extremes(Field& min, Field& max) const {

@@ -26,7 +26,6 @@
 #include "http/action/meta_action.h"
 #include "http/action/metrics_action.h"
 #include "http/action/mini_load.h"
-#include "http/action/monitor_action.h"
 #include "http/action/pprof_actions.h"
 #include "http/action/reload_tablet_action.h"
 #include "http/action/reset_rpc_channel_action.h"
@@ -67,10 +66,12 @@ Status HttpService::start() {
     _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/_stream_load_2pc",
                                       streamload_2pc_action);
 
-
     // register download action
     std::vector<std::string> allow_paths;
     for (auto& path : _env->store_paths()) {
+        if (FilePathDesc::is_remote(path.storage_medium)) {
+            continue;
+        }
         allow_paths.emplace_back(path.path);
     }
     DownloadAction* download_action = _pool.add(new DownloadAction(_env, allow_paths));
@@ -119,8 +120,7 @@ Status HttpService::start() {
     }
 
     MetaAction* meta_action = _pool.add(new MetaAction(HEADER));
-    _ev_http_server->register_handler(HttpMethod::GET, "/api/meta/header/{tablet_id}/{schema_hash}",
-                                      meta_action);
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/meta/header/{tablet_id}", meta_action);
 
 #ifndef BE_TEST
     // Register BE checksum action

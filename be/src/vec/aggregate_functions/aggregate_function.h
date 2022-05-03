@@ -57,7 +57,7 @@ public:
     /// Get the result type.
     virtual DataTypePtr get_return_type() const = 0;
 
-    virtual ~IAggregateFunction() {}
+    virtual ~IAggregateFunction() = default;
 
     /** Create empty data for aggregation with `placement new` at the specified location.
       * You will have to destroy them using the `destroy` method.
@@ -147,16 +147,19 @@ public:
 
     void add_batch(size_t batch_size, AggregateDataPtr* places, size_t place_offset,
                    const IColumn** columns, Arena* arena) const override {
-        for (size_t i = 0; i < batch_size; ++i)
+        for (size_t i = 0; i < batch_size; ++i) {
             static_cast<const Derived*>(this)->add(places[i] + place_offset, columns, i, arena);
+        }
     }
 
     void add_batch_single_place(size_t batch_size, AggregateDataPtr place, const IColumn** columns,
                                 Arena* arena) const override {
-        for (size_t i = 0; i < batch_size; ++i)
+        for (size_t i = 0; i < batch_size; ++i) {
             static_cast<const Derived*>(this)->add(place, columns, i, arena);
+        }
     }
     //now this is use for sum/count/avg/min/max win function, other win function should override this function in class
+    //stddev_pop/stddev_samp/variance_pop/variance_samp
     void add_range_single_place(int64_t partition_start, int64_t partition_end, int64_t frame_start,
                                 int64_t frame_end, AggregateDataPtr place, const IColumn** columns,
                                 Arena* arena) const override {
@@ -169,8 +172,9 @@ public:
 
     void add_batch_range(size_t batch_begin, size_t batch_end, AggregateDataPtr place,
                          const IColumn** columns, Arena* arena, bool has_null) override {
-        for (size_t i = batch_begin; i <= batch_end; ++i)
+        for (size_t i = batch_begin; i <= batch_end; ++i) {
             static_cast<const Derived*>(this)->add(place, columns, i, arena);
+        }
     }
 };
 

@@ -79,6 +79,19 @@ public class SqlBlockRuleMgr implements Writable {
         return Lists.newArrayList(nameToSqlBlockRuleMap.values());
     }
 
+    // check limitation's  effectiveness of a sql_block_rule
+    public static void verifyLimitations(SqlBlockRule sqlBlockRule) throws DdlException {
+        if (sqlBlockRule.getPartitionNum() < 0){
+            throw new DdlException("the value of partition_num can't be a negative");
+        }
+        if (sqlBlockRule.getTabletNum() < 0){
+            throw new DdlException("the value of tablet_num can't be a negative");
+        }
+        if (sqlBlockRule.getCardinality() < 0){
+            throw new DdlException("the value of cardinality can't be a negative");
+        }
+    }
+
     public void createSqlBlockRule(CreateSqlBlockRuleStmt stmt) throws UserException {
         writeLock();
         try {
@@ -87,6 +100,7 @@ public class SqlBlockRuleMgr implements Writable {
             if (existRule(ruleName)) {
                 throw new DdlException("the sql block rule " + ruleName + " already create");
             }
+            verifyLimitations(sqlBlockRule);
             unprotectedAdd(sqlBlockRule);
             Catalog.getCurrentCatalog().getEditLog().logCreateSqlBlockRule(sqlBlockRule);
         } finally {
@@ -108,20 +122,20 @@ public class SqlBlockRuleMgr implements Writable {
                 throw new DdlException("the sql block rule " + ruleName + " not exist");
             }
             SqlBlockRule originRule = nameToSqlBlockRuleMap.get(ruleName);
-            SqlBlockUtil.checkAlterValidate(sqlBlockRule, originRule);
-            if (StringUtils.isEmpty(sqlBlockRule.getSql())) {
+
+            if (sqlBlockRule.getSql().equals(CreateSqlBlockRuleStmt.STRING_NOT_SET)) {
                 sqlBlockRule.setSql(originRule.getSql());
             }
-            if (StringUtils.isEmpty(sqlBlockRule.getSqlHash())) {
+            if (sqlBlockRule.getSqlHash().equals(CreateSqlBlockRuleStmt.STRING_NOT_SET)) {
                 sqlBlockRule.setSqlHash(originRule.getSqlHash());
             }
-            if (StringUtils.isEmpty(sqlBlockRule.getPartitionNum().toString())) {
+            if (sqlBlockRule.getPartitionNum().equals(AlterSqlBlockRuleStmt.LONG_NOT_SET)) {
                 sqlBlockRule.setPartitionNum(originRule.getPartitionNum());
             }
-            if (StringUtils.isEmpty(sqlBlockRule.getTabletNum().toString())) {
+            if (sqlBlockRule.getTabletNum().equals(AlterSqlBlockRuleStmt.LONG_NOT_SET)) {
                 sqlBlockRule.setTabletNum(originRule.getTabletNum());
             }
-            if (StringUtils.isEmpty(sqlBlockRule.getCardinality().toString())) {
+            if (sqlBlockRule.getCardinality().equals(AlterSqlBlockRuleStmt.LONG_NOT_SET)) {
                 sqlBlockRule.setCardinality(originRule.getCardinality());
             }
             if (sqlBlockRule.getGlobal() == null) {
@@ -130,6 +144,9 @@ public class SqlBlockRuleMgr implements Writable {
             if (sqlBlockRule.getEnable() == null) {
                 sqlBlockRule.setEnable(originRule.getEnable());
             }
+            verifyLimitations(sqlBlockRule);
+            SqlBlockUtil.checkAlterValidate(sqlBlockRule);
+
             unprotectedUpdate(sqlBlockRule);
             Catalog.getCurrentCatalog().getEditLog().logAlterSqlBlockRule(sqlBlockRule);
         } finally {
@@ -231,11 +248,11 @@ public class SqlBlockRuleMgr implements Writable {
                     || (rule.getTabletNum() != 0 && rule.getTabletNum() < tabletNum)
                     || (rule.getCardinality() != 0 && rule.getCardinality() < cardinality)) {
                 MetricRepo.COUNTER_HIT_SQL_BLOCK_RULE.increase(1L);
-                if (rule.getPartitionNum() < partitionNum) {
+                if (rule.getPartitionNum() < partitionNum && rule.getPartitionNum() != 0) {
                     throw new AnalysisException("sql hits sql block rule: " + rule.getName() + ", reach partition_num : " + rule.getPartitionNum());
-                } else if (rule.getTabletNum() < tabletNum) {
+                } else if (rule.getTabletNum() < tabletNum && rule.getTabletNum() != 0) {
                     throw new AnalysisException("sql hits sql block rule: " + rule.getName() + ", reach tablet_num : " + rule.getTabletNum());
-                } else if (rule.getCardinality() < cardinality) {
+                } else if (rule.getCardinality() < cardinality && rule.getCardinality() != 0) {
                     throw new AnalysisException("sql hits sql block rule: " + rule.getName() + ", reach cardinality : " + rule.getCardinality());
                 }
             }

@@ -17,14 +17,6 @@
 
 #include "exprs/table_function/table_function_factory.h"
 
-#include "common/object_pool.h"
-#include "exprs/table_function/explode_bitmap.h"
-#include "exprs/table_function/explode_json_array.h"
-#include "exprs/table_function/explode_split.h"
-#include "exprs/table_function/table_function.h"
-#include "vec/exprs/table_function/vexplode_numbers.h"
-#include "vec/exprs/table_function/vexplode_split.h"
-
 namespace doris {
 
 template <typename TableFunctionType>
@@ -35,7 +27,15 @@ struct TableFunctionCreator {
 template <>
 struct TableFunctionCreator<ExplodeJsonArrayTableFunction> {
     ExplodeJsonArrayType type;
-    TableFunction* operator()() { return new ExplodeJsonArrayTableFunction(type); }
+    TableFunction* operator()() const { return new ExplodeJsonArrayTableFunction(type); }
+};
+
+template <>
+struct TableFunctionCreator<vectorized::VExplodeJsonArrayTableFunction> {
+    ExplodeJsonArrayType type;
+    TableFunction* operator()() const {
+        return new vectorized::VExplodeJsonArrayTableFunction(type);
+    }
 };
 
 inline auto ExplodeJsonArrayIntCreator =
@@ -45,29 +45,64 @@ inline auto ExplodeJsonArrayDoubleCreator =
 inline auto ExplodeJsonArrayStringCreator =
         TableFunctionCreator<ExplodeJsonArrayTableFunction> {ExplodeJsonArrayType::STRING};
 
-//{fn_name,is_vectorized}->table_function_creator
+inline auto VExplodeJsonArrayIntCreator =
+        TableFunctionCreator<vectorized::VExplodeJsonArrayTableFunction> {
+                ExplodeJsonArrayType::INT};
+inline auto VExplodeJsonArrayDoubleCreator =
+        TableFunctionCreator<vectorized::VExplodeJsonArrayTableFunction> {
+                ExplodeJsonArrayType::DOUBLE};
+inline auto VExplodeJsonArrayStringCreator =
+        TableFunctionCreator<vectorized::VExplodeJsonArrayTableFunction> {
+                ExplodeJsonArrayType::STRING};
+
+// {fn_name, is_vectorized} -> table_function_creator
 const std::unordered_map<std::pair<std::string, bool>, std::function<TableFunction*()>>
         TableFunctionFactory::_function_map {
-                {{"explode_split", false}, TableFunctionCreator<ExplodeSplitTableFunction>()},
-                {{"explode_bitmap", false}, TableFunctionCreator<ExplodeBitmapTableFunction>()},
+                {{"explode_split", false}, TableFunctionCreator<ExplodeSplitTableFunction> {}},
+                {{"explode_bitmap", false}, TableFunctionCreator<ExplodeBitmapTableFunction> {}},
                 {{"explode_json_array_int", false}, ExplodeJsonArrayIntCreator},
                 {{"explode_json_array_double", false}, ExplodeJsonArrayDoubleCreator},
                 {{"explode_json_array_string", false}, ExplodeJsonArrayStringCreator},
                 {{"explode_split", true},
                  TableFunctionCreator<vectorized::VExplodeSplitTableFunction>()},
                 {{"explode_numbers", true},
-                 TableFunctionCreator<vectorized::VExplodeNumbersTableFunction>()}};
+                 TableFunctionCreator<vectorized::VExplodeNumbersTableFunction>()},
+                {{"explode_json_array_int", true}, VExplodeJsonArrayIntCreator},
+                {{"explode_json_array_double", true}, VExplodeJsonArrayDoubleCreator},
+                {{"explode_json_array_string", true}, VExplodeJsonArrayStringCreator},
+                {{"explode_bitmap", true},
+                 TableFunctionCreator<vectorized::VExplodeBitmapTableFunction>()},
+                {{"explode", true}, TableFunctionCreator<vectorized::VExplodeTableFunction> {}}};
 
-Status TableFunctionFactory::get_fn(const std::string& fn_name, bool is_vectorized,
+Status TableFunctionFactory::get_fn(const std::string& fn_name_raw, bool is_vectorized,
                                     ObjectPool* pool, TableFunction** fn) {
-    auto fn_iterator = _function_map.find({fn_name, is_vectorized});
+    auto match_suffix = [](const std::string& name, const std::string& suffix) -> bool {
+        if (name.length() < suffix.length()) {
+            return false;
+        }
+        return name.substr(name.length() - suffix.length()) == suffix;
+    };
+
+    auto remove_suffix = [](const std::string& name, const std::string& suffix) -> std::string {
+        return name.substr(0, name.length() - suffix.length());
+    };
+
+    bool is_outer = match_suffix(fn_name_raw, COMBINATOR_SUFFIX_OUTER);
+    std::string fn_name_real =
+            is_outer ? remove_suffix(fn_name_raw, COMBINATOR_SUFFIX_OUTER) : fn_name_raw;
+
+    auto fn_iterator = _function_map.find({fn_name_real, is_vectorized});
     if (fn_iterator != _function_map.end()) {
         *fn = pool->add(fn_iterator->second());
+        if (is_outer) {
+            (*fn)->set_outer();
+        }
+
         return Status::OK();
     }
 
     return Status::NotSupported(std::string(is_vectorized ? "vectorized " : "") +
-                                "table function " + fn_name + " not support");
+                                "table function " + fn_name_raw + " not support");
 }
 
 } // namespace doris

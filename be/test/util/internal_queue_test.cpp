@@ -24,7 +24,7 @@
 #include <thread>
 
 #include "common/configbase.h"
-#include "test_util/test_util.h"
+#include "testutil/test_util.h"
 #include "util/logging.h"
 #include "util/thread_group.h"
 
@@ -222,7 +222,7 @@ TEST(InternalQueue, TestClear) {
 
 TEST(InternalQueue, TestSingleProducerSingleConsumer) {
     std::vector<IntNode> nodes;
-    std::atomic<int32_t> counter;
+    std::atomic<int32_t> counter = 0;
     nodes.resize(LOOP_LESS_OR_MORE(100, 1000000));
     std::vector<int> results;
 
@@ -309,14 +309,3 @@ TEST(InternalQueue, TestMultiProducerMultiConsumer) {
 }
 
 } // end namespace doris
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

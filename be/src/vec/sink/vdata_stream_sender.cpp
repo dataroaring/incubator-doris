@@ -27,6 +27,7 @@
 #include "runtime/exec_env.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "util/proto_util.h"
 #include "vec/common/sip_hash.h"
 #include "vec/runtime/vdata_stream_mgr.h"
@@ -55,7 +56,6 @@ Status VDataStreamSender::Channel::init(RuntimeState* state) {
     _brpc_request.set_be_number(_be_number);
 
     _brpc_timeout_ms = std::min(3600, state->query_options().query_timeout) * 1000;
-    _brpc_stub = state->exec_env()->brpc_internal_client_cache()->get_client(_brpc_dest_addr);
 
     if (_brpc_dest_addr.hostname == BackendOptions::get_localhost()) {
         _brpc_stub = state->exec_env()->brpc_internal_client_cache()->get_client(
@@ -122,7 +122,8 @@ Status VDataStreamSender::Channel::send_block(PBlock* block, bool eos) {
         _closure->cntl.Reset();
     }
     VLOG_ROW << "Channel::send_batch() instance_id=" << _fragment_instance_id
-             << " dest_node=" << _dest_node_id;
+             << " dest_node=" << _dest_node_id << " to_host=" << _brpc_dest_addr.hostname
+             << " _packet_seq=" << _packet_seq << " row_desc=" << _row_desc.debug_string();
     if (_is_transfer_chain && (_send_query_statistics_with_every_batch || eos)) {
         auto statistic = _brpc_request.mutable_query_statistics();
         _parent->_query_statistics->to_pb(statistic);
@@ -139,8 +140,8 @@ Status VDataStreamSender::Channel::send_block(PBlock* block, bool eos) {
 
     if (_brpc_request.has_block()) {
         request_block_transfer_attachment<PTransmitDataParams,
-            RefCountClosure<PTransmitDataResult>>(&_brpc_request, _parent->_column_values_buffer,
-                    _closure);
+                                          RefCountClosure<PTransmitDataResult>>(
+                &_brpc_request, _parent->_column_values_buffer, _closure);
     }
 
     _brpc_stub->transmit_block(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
@@ -342,6 +343,7 @@ Status VDataStreamSender::prepare(RuntimeState* state) {
     _mem_tracker = MemTracker::create_tracker(
             -1, "VDataStreamSender:" + print_id(state->fragment_instance_id()),
             state->instance_mem_tracker(), MemTrackerLevel::VERBOSE, _profile);
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
 
     if (_part_type == TPartitionType::UNPARTITIONED || _part_type == TPartitionType::RANDOM) {
         std::random_device rd;
@@ -375,6 +377,7 @@ Status VDataStreamSender::prepare(RuntimeState* state) {
 
 Status VDataStreamSender::open(RuntimeState* state) {
     DCHECK(state != nullptr);
+    SCOPED_SWITCH_THREAD_LOCAL_MEM_TRACKER(_mem_tracker);
     RETURN_IF_ERROR(VExpr::open(_partition_expr_ctxs, state));
     for (auto iter : _partition_infos) {
         RETURN_IF_ERROR(iter->open(state));
@@ -388,6 +391,7 @@ Status VDataStreamSender::send(RuntimeState* state, RowBatch* batch) {
 
 Status VDataStreamSender::send(RuntimeState* state, Block* block) {
     SCOPED_TIMER(_profile->total_time_counter());
+    SCOPED_SWITCH_TASK_THREAD_LOCAL_EXISTED_MEM_TRACKER(_mem_tracker);
     if (_part_type == TPartitionType::UNPARTITIONED || _channels.size() == 1) {
         // 1. serialize depends on it is not local exchange
         // 2. send block
@@ -410,7 +414,7 @@ Status VDataStreamSender::send(RuntimeState* state, Block* block) {
                 }
             }
             // rollover
-            _roll_pb_block(); 
+            _roll_pb_block();
         }
     } else if (_part_type == TPartitionType::RANDOM) {
         // 1. select channel
@@ -425,9 +429,9 @@ Status VDataStreamSender::send(RuntimeState* state, Block* block) {
         }
         _current_channel_idx = (_current_channel_idx + 1) % _channels.size();
     } else if (_part_type == TPartitionType::HASH_PARTITIONED) {
-        int num_channels = _channels.size();
         // will only copy schema
         // we don't want send temp columns
+        auto column_to_keep = block->columns();
 
         int result_size = _partition_expr_ctxs.size();
         int result[result_size];
@@ -451,12 +455,14 @@ Status VDataStreamSender::send(RuntimeState* state, Block* block) {
             hash_vals[i] = siphashs[i].get64();
         }
 
-        RETURN_IF_ERROR(channel_add_rows(_channels, num_channels, hash_vals, rows, block));
+        Block::erase_useless_column(block, column_to_keep);
+        RETURN_IF_ERROR(channel_add_rows(_channels, _channels.size(), hash_vals, rows, block));
     } else if (_part_type == TPartitionType::BUCKET_SHFFULE_HASH_PARTITIONED) {
+        // will only copy schema
+        // we don't want send temp columns
+        auto column_to_keep = block->columns();
         // 1. calculate hash
         // 2. dispatch rows to channel
-        int num_channels = _channel_shared_ptrs.size();
-
         int result_size = _partition_expr_ctxs.size();
         int result[result_size];
         RETURN_IF_ERROR(get_partition_column_result(block, result));
@@ -484,8 +490,9 @@ Status VDataStreamSender::send(RuntimeState* state, Block* block) {
             }
         }
 
-        RETURN_IF_ERROR(
-                channel_add_rows(_channel_shared_ptrs, num_channels, hash_vals, rows, block));
+        Block::erase_useless_column(block, column_to_keep);
+        RETURN_IF_ERROR(channel_add_rows(_channel_shared_ptrs, _channel_shared_ptrs.size(),
+                                         hash_vals, rows, block));
     } else {
         // Range partition
         // 1. calculate range
@@ -496,7 +503,6 @@ Status VDataStreamSender::send(RuntimeState* state, Block* block) {
 
 Status VDataStreamSender::close(RuntimeState* state, Status exec_status) {
     if (_closed) return Status::OK();
-    _closed = true;
 
     Status final_st = Status::OK();
     for (int i = 0; i < _channels.size(); ++i) {
@@ -516,6 +522,7 @@ Status VDataStreamSender::close(RuntimeState* state, Status exec_status) {
         iter->close(state);
     }
     VExpr::close(_partition_expr_ctxs, state);
+    DataSink::close(state, exec_status);
     return final_st;
 }
 
@@ -524,7 +531,8 @@ Status VDataStreamSender::serialize_block(Block* src, PBlock* dest, int num_rece
         SCOPED_TIMER(_serialize_batch_timer);
         dest->Clear();
         size_t uncompressed_bytes = 0, compressed_bytes = 0;
-        RETURN_IF_ERROR(src->serialize(dest, &uncompressed_bytes, &compressed_bytes, &_column_values_buffer));
+        RETURN_IF_ERROR(src->serialize(dest, &uncompressed_bytes, &compressed_bytes,
+                                       &_column_values_buffer));
         COUNTER_UPDATE(_bytes_sent_counter, compressed_bytes * num_receivers);
         COUNTER_UPDATE(_uncompressed_bytes_counter, uncompressed_bytes * num_receivers);
     }

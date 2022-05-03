@@ -31,7 +31,6 @@
 #include "olap/olap_common.h"
 #include "olap/rowset/rowset_id_generator.h"
 #include "util/metrics.h"
-#include "util/mutex.h"
 
 namespace doris {
 
@@ -46,7 +45,6 @@ class DataDir {
 public:
     DataDir(const std::string& path, int64_t capacity_bytes = -1,
             TStorageMedium::type storage_medium = TStorageMedium::HDD,
-            const std::string& remote_path = "",
             TabletManager* tablet_manager = nullptr, TxnManager* txn_manager = nullptr);
     ~DataDir();
 
@@ -54,7 +52,7 @@ public:
     void stop_bg_worker();
 
     const std::string& path() const { return _path_desc.filepath; }
-    const FilePathDesc& path_desc() const { return _path_desc;}
+    const FilePathDesc& path_desc() const { return _path_desc; }
     size_t path_hash() const { return _path_hash; }
     bool is_used() const { return _is_used; }
     void set_is_used(bool is_used) { _is_used = is_used; }
@@ -78,13 +76,13 @@ public:
     Status set_cluster_id(int32_t cluster_id);
     void health_check();
 
-    OLAPStatus get_shard(uint64_t* shard);
+    Status get_shard(uint64_t* shard);
 
     OlapMeta* get_meta() { return _meta; }
 
     bool is_ssd_disk() const { return _storage_medium == TStorageMedium::SSD; }
 
-    bool is_remote() const { return _env->is_remote_env(); }
+    bool is_remote() const { return FilePathDesc::is_remote(_storage_medium); }
 
     TStorageMedium::type storage_medium() const { return _storage_medium; }
 
@@ -101,7 +99,7 @@ public:
             const std::string& schema_hash_dir_in_trash);
 
     // load data from meta and data files
-    OLAPStatus load();
+    Status load();
 
     void add_pending_ids(const std::string& id);
 
@@ -133,9 +131,13 @@ public:
 
     void disks_compaction_num_increment(int64_t delta);
 
-    Env* env() {
-        return _env;
-    }
+    // Move segment_path_desc to trash, trash is in storage_root/trash, segment_path_desc can be file or dir
+    // Modify segment_path_desc when this operation is being done.
+    // filepath is replaced by：
+    // storage_root/trash/20150619154308.delete_counter/tablet_path/segment_path,
+    // remote_path is replaced by：
+    // storage_root/trash/20150619154308.delete_counter/tablet_path/segment_path/tablet_uid
+    Status move_to_trash(const FilePathDesc& segment_path_desc);
 
 private:
     Status _init_cluster_id();
@@ -143,13 +145,13 @@ private:
     Status _init_meta();
 
     Status _check_disk();
-    OLAPStatus _read_and_write_test_file();
+    Status _read_and_write_test_file();
     Status read_cluster_id(Env* env, const std::string& cluster_id_path, int32_t* cluster_id);
     Status _write_cluster_id_to_path(const FilePathDesc& path_desc, int32_t cluster_id);
     // Check whether has old format (hdr_ start) in olap. When doris updating to current version,
     // it may lead to data missing. When conf::storage_strict_check_incompatible_old_format is true,
     // process will log fatal.
-    OLAPStatus _check_incompatible_old_format_tablet();
+    Status _check_incompatible_old_format_tablet();
 
     void _process_garbage_path(const std::string& path);
 
@@ -172,7 +174,6 @@ private:
     int64_t _disk_capacity_bytes;
     TStorageMedium::type _storage_medium;
     bool _is_used;
-    Env* _env = nullptr;
 
     TabletManager* _tablet_manager;
     TxnManager* _txn_manager;

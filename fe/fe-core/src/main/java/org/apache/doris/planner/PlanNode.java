@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/PlanNode.java
+// and modified by Doris
 
 package org.apache.doris.planner;
 
@@ -29,9 +32,11 @@ import org.apache.doris.analysis.TupleId;
 import org.apache.doris.catalog.Function;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.NotImplementedException;
 import org.apache.doris.common.TreeNode;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.VectorizedUtil;
+import org.apache.doris.statistics.StatsDeriveResult;
 import org.apache.doris.thrift.TExplainLevel;
 import org.apache.doris.thrift.TFunctionBinaryType;
 import org.apache.doris.thrift.TPlan;
@@ -129,6 +134,11 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
 
     private boolean cardinalityIsDone = false;
 
+    protected List<SlotId> outputSlotIds;
+
+    protected NodeType nodeType = NodeType.DEFAULT;
+    protected StatsDeriveResult statsDeriveResult;
+
     protected PlanNode(PlanNodeId id, ArrayList<TupleId> tupleIds, String planNodeName) {
         this.id = id;
         this.limit = -1;
@@ -167,10 +177,39 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         this.planNodeName = VectorizedUtil.isVectorized() ?
                 "V" + planNodeName : planNodeName;
         this.numInstances = 1;
+        this.nodeType = nodeType;
+    }
+
+    public enum NodeType {
+        DEFAULT,
+        AGG_NODE,
+        BROKER_SCAN_NODE,
+        HASH_JOIN_NODE,
+        HIVE_SCAN_NODE,
+        MERGE_NODE,
+        ES_SCAN_NODE,
+        ICEBREG_SCAN_NODE,
+        LOAD_SCAN_NODE,
+        MYSQL_SCAN_NODE,
+        ODBC_SCAN_NODE,
+        OLAP_SCAN_NODE,
+        SCHEMA_SCAN_NODE,
     }
 
     public String getPlanNodeName() {
         return planNodeName;
+    }
+
+    public StatsDeriveResult getStatsDeriveResult() {
+        return statsDeriveResult;
+    }
+
+    public NodeType getNodeType() {
+        return nodeType;
+    }
+
+    public void setStatsDeriveResult(StatsDeriveResult statsDeriveResult) {
+        this.statsDeriveResult = statsDeriveResult;
     }
 
     /**
@@ -491,6 +530,11 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         }
 
         msg.compact_data = compactData;
+        if (outputSlotIds != null) {
+            for (SlotId slotId : outputSlotIds) {
+                msg.addToOutputSlotIds(slotId.asInt());
+            }
+        }
         toThrift(msg);
         container.addToNodes(msg);
         if (this instanceof ExchangeNode) {
@@ -851,15 +895,6 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         return Joiner.on(", ").join(filtersStr) + "\n";
     }
 
-    @Override
-    public String toString() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("[").append(getId().asInt()).append(": ").append(getPlanNodeName()).append("]");
-        sb.append("\nFragment: ").append(getFragmentId().asInt()).append("]");
-        sb.append("\n").append(getNodeExplainString("", TExplainLevel.BRIEF));
-        return sb.toString();
-    }
-
     public void convertToVectoriezd() {
         if (!conjuncts.isEmpty()) {
             vconjunct = convertConjunctsToAndCompoundPredicate(conjuncts);
@@ -869,5 +904,65 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         for (PlanNode child : children) {
             child.convertToVectoriezd();
         }
+    }
+
+    /**
+     * If an plan node implements this method, the plan node itself supports project optimization.
+     * @param requiredSlotIdSet: The upper plan node's requirement slot set for the current plan node.
+     *                        The requiredSlotIdSet could be null when the upper plan node cannot
+     *                         calculate the required slot.
+     * @param analyzer
+     * @throws NotImplementedException
+     *
+     * For example:
+     * Query: select a.k1 from a, b where a.k1=b.k1
+     * PlanNodeTree:
+     *     output exprs: a.k1
+     *           |
+     *     hash join node
+     *   (input slots: a.k1, b.k1)
+     *        |      |
+     *  scan a(k1)   scan b(k1)
+     *
+     * Function params: requiredSlotIdSet = a.k1
+     * After function:
+     *     hash join node
+     *   (output slots: a.k1)
+     *   (input slots: a.k1, b.k1)
+     */
+    public void initOutputSlotIds(Set<SlotId> requiredSlotIdSet, Analyzer analyzer) throws NotImplementedException {
+        throw new NotImplementedException("The `initOutputSlotIds` hasn't been implemented in " + planNodeName);
+    }
+
+    /**
+     * If an plan node implements this method, its child plan node has the ability to implement the project.
+     * The return value of this method will be used as
+     *     the input(requiredSlotIdSet) of child plan node method initOutputSlotIds.
+     * That is to say, only when the plan node implements this method,
+     *     its children can realize project optimization.
+     *
+     * @return The requiredSlotIdSet of this plan node
+     * @throws NotImplementedException
+     * PlanNodeTree:
+     *         agg node(group by a.k1)
+     *           |
+     *     hash join node(a.k1=b.k1)
+     *        |      |
+     *  scan a(k1)   scan b(k1)
+     * After function:
+     *         agg node
+     *    (required slots: a.k1)
+     */
+    public Set<SlotId> computeInputSlotIds() throws NotImplementedException {
+        throw new NotImplementedException("The `computeInputSlotIds` hasn't been implemented in " + planNodeName);
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[").append(getId().asInt()).append(": ").append(getPlanNodeName()).append("]");
+        sb.append("\nFragment: ").append(getFragmentId().asInt()).append("]");
+        sb.append("\n").append(getNodeExplainString("", TExplainLevel.BRIEF));
+        return sb.toString();
     }
 }

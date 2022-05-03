@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -28,10 +29,10 @@
 #include "common/logging.h"
 #include "env/env.h"
 #include "env/env_posix.h"
-#include "env/env_remote.h"
 #include "env/env_util.h"
 #include "gutil/strings/substitute.h"
 #include "olap/fs/block_id.h"
+#include "util/storage_backend.h"
 
 using std::shared_ptr;
 using std::string;
@@ -110,15 +111,14 @@ private:
     size_t _bytes_appended;
 };
 
-RemoteWritableBlock::RemoteWritableBlock(RemoteBlockManager* block_manager, const FilePathDesc& path_desc,
+RemoteWritableBlock::RemoteWritableBlock(RemoteBlockManager* block_manager,
+                                         const FilePathDesc& path_desc,
                                          shared_ptr<WritableFile> local_writer)
         : _block_manager(block_manager),
           _path_desc(path_desc),
-          _local_writer(std::move(local_writer)) {
-}
+          _local_writer(std::move(local_writer)) {}
 
-RemoteWritableBlock::~RemoteWritableBlock() {
-}
+RemoteWritableBlock::~RemoteWritableBlock() {}
 
 Status RemoteWritableBlock::close() {
     return Status::IOError("invalid function", 0, "");
@@ -222,11 +222,9 @@ private:
 
 RemoteReadableBlock::RemoteReadableBlock(
         RemoteBlockManager* block_manager, const FilePathDesc& path_desc,
-        std::shared_ptr<OpenedFileHandle<RandomAccessFile>> file_handle) {
-}
+        std::shared_ptr<OpenedFileHandle<RandomAccessFile>> file_handle) {}
 
-RemoteReadableBlock::~RemoteReadableBlock() {
-}
+RemoteReadableBlock::~RemoteReadableBlock() {}
 
 Status RemoteReadableBlock::close() {
     return Status::IOError("invalid function", 0, "");
@@ -263,10 +261,10 @@ Status RemoteReadableBlock::readv(uint64_t offset, const Slice* results, size_t 
 // RemoteBlockManager
 ////////////////////////////////////////////////////////////
 
-RemoteBlockManager::RemoteBlockManager(Env* local_env, RemoteEnv* remote_env,
+RemoteBlockManager::RemoteBlockManager(Env* local_env,
+                                       std::shared_ptr<StorageBackend> storage_backend,
                                        const BlockManagerOptions& opts)
-        : _local_env(local_env), _remote_env(remote_env), _opts(opts) {
-}
+        : _local_env(local_env), _storage_backend(storage_backend), _opts(opts) {}
 
 RemoteBlockManager::~RemoteBlockManager() {}
 
@@ -276,13 +274,17 @@ Status RemoteBlockManager::open() {
 
 Status RemoteBlockManager::create_block(const CreateBlockOptions& opts,
                                         std::unique_ptr<WritableBlock>* block) {
-    CHECK(!_opts.read_only);
+    if (_opts.read_only) {
+        std::stringstream ss;
+        ss << "create_block failed. remote block is readonly: " << opts.path_desc.debug_string();
+        return Status::NotSupported(ss.str());
+    }
 
     shared_ptr<WritableFile> local_writer;
     WritableFileOptions wr_opts;
     wr_opts.mode = Env::MUST_CREATE;
-    RETURN_IF_ERROR(env_util::open_file_for_write(
-            wr_opts, Env::Default(), opts.path_desc.filepath, &local_writer));
+    RETURN_IF_ERROR(env_util::open_file_for_write(wr_opts, Env::Default(), opts.path_desc.filepath,
+                                                  &local_writer));
 
     VLOG_CRITICAL << "Creating new remote block. local: " << opts.path_desc.filepath
                   << ", remote: " << opts.path_desc.remote_path;
@@ -290,9 +292,10 @@ Status RemoteBlockManager::create_block(const CreateBlockOptions& opts,
     return Status::OK();
 }
 
-Status RemoteBlockManager::open_block(const FilePathDesc& path_desc, std::unique_ptr<ReadableBlock>* block) {
-    VLOG_CRITICAL << "Opening remote block. local: "
-                  << path_desc.filepath << ", remote: " << path_desc.remote_path;
+Status RemoteBlockManager::open_block(const FilePathDesc& path_desc,
+                                      std::unique_ptr<ReadableBlock>* block) {
+    VLOG_CRITICAL << "Opening remote block. local: " << path_desc.filepath
+                  << ", remote: " << path_desc.remote_path;
     std::shared_ptr<OpenedFileHandle<RandomAccessFile>> file_handle;
     if (Env::Default()->path_exists(path_desc.filepath).ok()) {
         file_handle.reset(new OpenedFileHandle<RandomAccessFile>());
@@ -314,25 +317,27 @@ Status RemoteBlockManager::delete_block(const FilePathDesc& path_desc, bool is_d
             RETURN_IF_ERROR(_local_env->delete_dir(path_desc.filepath));
         }
         if (!path_desc.remote_path.empty()) {
-            RETURN_IF_ERROR(_remote_env->delete_dir(path_desc.remote_path));
+            RETURN_IF_ERROR(_storage_backend->rmdir(path_desc.remote_path));
         }
     } else {
         if (_local_env->path_exists(path_desc.filepath).ok()) {
             RETURN_IF_ERROR(_local_env->delete_file(path_desc.filepath));
         }
-        if (_remote_env->path_exists(path_desc.remote_path).ok()) {
-            RETURN_IF_ERROR(_remote_env->delete_file(path_desc.remote_path));
+        if (_storage_backend->exist(path_desc.remote_path).ok()) {
+            RETURN_IF_ERROR(_storage_backend->rm(path_desc.remote_path));
         }
     }
     return Status::OK();
 }
 
-Status RemoteBlockManager::link_file(const FilePathDesc& src_path_desc, const FilePathDesc& dest_path_desc) {
+Status RemoteBlockManager::link_file(const FilePathDesc& src_path_desc,
+                                     const FilePathDesc& dest_path_desc) {
     if (_local_env->path_exists(src_path_desc.filepath).ok()) {
         RETURN_IF_ERROR(_local_env->link_file(src_path_desc.filepath, dest_path_desc.filepath));
     }
-    if (_remote_env->path_exists(src_path_desc.remote_path).ok()) {
-        RETURN_IF_ERROR(_remote_env->link_file(src_path_desc.remote_path, dest_path_desc.remote_path));
+    if (_storage_backend->exist(src_path_desc.remote_path).ok()) {
+        RETURN_IF_ERROR(
+                _storage_backend->copy(src_path_desc.remote_path, dest_path_desc.remote_path));
     }
     return Status::OK();
 }

@@ -21,11 +21,13 @@
 #pragma once
 
 #include "vec/aggregate_functions/aggregate_function.h"
+#include "vec/aggregate_functions/helpers.h"
 #include "vec/columns/column_vector.h"
 #include "vec/data_types/data_type_decimal.h"
 #include "vec/data_types/data_type_number.h"
 #include "vec/data_types/data_type_string.h"
 #include "vec/io/io_helper.h"
+#include "factory_helpers.h"
 
 namespace doris::vectorized {
 
@@ -53,7 +55,9 @@ public:
         ++data(place).count;
     }
 
-    void reset(AggregateDataPtr place) const override { this->data(place).count = 0; }
+    void reset(AggregateDataPtr place) const override {
+        WindowFunctionRowNumber::data(place).count = 0;
+    }
 
     void insert_result_into(ConstAggregateDataPtr place, IColumn& to) const override {
         assert_cast<ColumnInt64&>(to).get_data().push_back(data(place).count);
@@ -87,17 +91,17 @@ public:
                                 int64_t frame_end, AggregateDataPtr place, const IColumn** columns,
                                 Arena* arena) const override {
         int64_t peer_group_count = frame_end - frame_start;
-        if (this->data(place).peer_group_start != frame_start) {
-            this->data(place).peer_group_start = frame_start;
-            this->data(place).rank += this->data(place).count;
+        if (WindowFunctionRank::data(place).peer_group_start != frame_start) {
+            WindowFunctionRank::data(place).peer_group_start = frame_start;
+            WindowFunctionRank::data(place).rank += WindowFunctionRank::data(place).count;
         }
-        this->data(place).count = peer_group_count;
+        WindowFunctionRank::data(place).count = peer_group_count;
     }
 
     void reset(AggregateDataPtr place) const override {
-        this->data(place).rank = 0;
-        this->data(place).count = 1;
-        this->data(place).peer_group_start = -1;
+        WindowFunctionRank::data(place).rank = 0;
+        WindowFunctionRank::data(place).count = 1;
+        WindowFunctionRank::data(place).peer_group_start = -1;
     }
 
     void insert_result_into(ConstAggregateDataPtr place, IColumn& to) const override {
@@ -130,15 +134,15 @@ public:
     void add_range_single_place(int64_t partition_start, int64_t partition_end, int64_t frame_start,
                                 int64_t frame_end, AggregateDataPtr place, const IColumn** columns,
                                 Arena* arena) const override {
-        if (this->data(place).peer_group_start != frame_start) {
-            this->data(place).peer_group_start = frame_start;
-            this->data(place).rank++;
+        if (WindowFunctionDenseRank::data(place).peer_group_start != frame_start) {
+            WindowFunctionDenseRank::data(place).peer_group_start = frame_start;
+            WindowFunctionDenseRank::data(place).rank++;
         }
     }
 
     void reset(AggregateDataPtr place) const override {
-        this->data(place).rank = 0;
-        this->data(place).peer_group_start = -1;
+        WindowFunctionDenseRank::data(place).rank = 0;
+        WindowFunctionDenseRank::data(place).peer_group_start = -1;
     }
 
     void insert_result_into(ConstAggregateDataPtr place, IColumn& to) const override {
@@ -357,9 +361,7 @@ struct WindowFunctionLastData : Data {
         frame_end = std::min<int64_t>(frame_end, partition_end);
         this->set_value(columns, frame_end - 1);
     }
-    void add(int64_t row, const IColumn** columns) {
-        this->set_value(columns, row);
-    }
+    void add(int64_t row, const IColumn** columns) { this->set_value(columns, row); }
     static const char* name() { return "last_value"; }
 };
 
@@ -405,19 +407,62 @@ private:
     DataTypePtr _argument_type;
 };
 
-AggregateFunctionPtr create_aggregate_function_replace_if_not_null(const std::string& name,
-                                                                   const DataTypes& argument_types,
-                                                                   const Array& parameters,
-                                                                   const bool result_is_nullable);
+template <template <typename> class AggregateFunctionTemplate, template <typename> class Data,
+          bool is_nullable, bool is_copy = false>
+static IAggregateFunction* create_function_single_value(const String& name,
+                                                        const DataTypes& argument_types,
+                                                        const Array& parameters) {
+    using StoreType = std::conditional_t<is_copy, CopiedValue, Value>;
 
-AggregateFunctionPtr create_aggregate_function_replace(const std::string& name,
-                                                       const DataTypes& argument_types,
-                                                       const Array& parameters,
-                                                       const bool result_is_nullable);
+    assert_arity_at_most<3>(name, argument_types);
 
-AggregateFunctionPtr create_aggregate_function_replace_nullable(const std::string& name,
-                                                                const DataTypes& argument_types,
-                                                                const Array& parameters,
-                                                                const bool result_is_nullable);
+    auto type = argument_types[0].get();
+    if (type->is_nullable()) {
+        type = assert_cast<const DataTypeNullable*>(type)->get_nested_type().get();
+    }
+    WhichDataType which(*type);
+
+#define DISPATCH(TYPE)                        \
+    if (which.idx == TypeIndex::TYPE)         \
+        return new AggregateFunctionTemplate< \
+                Data<LeadAndLagData<TYPE, is_nullable, false, StoreType>>>(argument_types);
+    FOR_NUMERIC_TYPES(DISPATCH)
+#undef DISPATCH
+
+    if (which.is_decimal()) {
+        return new AggregateFunctionTemplate<
+                Data<LeadAndLagData<Int128, is_nullable, false, StoreType>>>(argument_types);
+    }
+    if (which.is_date_or_datetime()) {
+        return new AggregateFunctionTemplate<
+                Data<LeadAndLagData<Int64, is_nullable, false, StoreType>>>(argument_types);
+    }
+    if (which.is_string_or_fixed_string()) {
+        return new AggregateFunctionTemplate<
+                Data<LeadAndLagData<StringRef, is_nullable, true, StoreType>>>(argument_types);
+    }
+    DCHECK(false) << "with unknowed type, failed in  create_aggregate_function_leadlag";
+    return nullptr;
+}
+
+template <bool is_nullable, bool is_copy>
+AggregateFunctionPtr create_aggregate_function_first(const std::string& name,
+                                                     const DataTypes& argument_types,
+                                                     const Array& parameters,
+                                                     bool result_is_nullable) {
+    return AggregateFunctionPtr(
+            create_function_single_value<WindowFunctionData, WindowFunctionFirstData, is_nullable,
+                                         is_copy>(name, argument_types, parameters));
+}
+
+template <bool is_nullable, bool is_copy>
+AggregateFunctionPtr create_aggregate_function_last(const std::string& name,
+                                                    const DataTypes& argument_types,
+                                                    const Array& parameters,
+                                                    bool result_is_nullable) {
+    return AggregateFunctionPtr(
+            create_function_single_value<WindowFunctionData, WindowFunctionLastData, is_nullable,
+                                         is_copy>(name, argument_types, parameters));
+}
 
 } // namespace doris::vectorized
