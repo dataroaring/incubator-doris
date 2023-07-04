@@ -113,7 +113,7 @@ private:
     int64_t _cur_max_version;
 
     bool _success;
-    std::vector<io::FileWriterPtr> _segment_file_writers;
+    std::unordered_map<uint32_t, io::FileWriterPtr> _segment_file_writers;
 };
 
 using RowsetBuilderSharedPtr = std::shared_ptr<RowsetBuilder>;
