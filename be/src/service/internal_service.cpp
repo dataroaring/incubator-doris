@@ -251,19 +251,18 @@ void PInternalServiceImpl::tablet_writer_open(google::protobuf::RpcController* c
 }
 
 void PInternalServiceImpl::open_stream_sink(google::protobuf::RpcController* controller,
-                                            const PTabletWriterOpenRequest* request,
+                                            const POpenStreamSinkRequest* request,
                                             POpenStreamSinkResponse* response,
                                             google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
-    LOG(INFO) << "OOXXOO: open stream sink, backend_id = "; //TODO: remove log
+    LOG(INFO) << "OOXXOO: open stream sink, backend_id = " << request->backend_id();
     std::unique_ptr<PStatus> status = std::make_unique<PStatus>();
     brpc::Controller* cntl = static_cast<brpc::Controller*>(controller);
     brpc::StreamOptions stream_options;
 
-    /*
-    if (request->has_tablet_id()) {
+    for (const auto& req : request->tablets()) {
         TabletManager* tablet_mgr = StorageEngine::instance()->tablet_manager();
-        TabletSharedPtr tablet = tablet_mgr->get_tablet(request->tablet_id());
+        TabletSharedPtr tablet = tablet_mgr->get_tablet(req.tablet_id());
         if (tablet == nullptr) {
             cntl->SetFailed("Tablet not found");
             status->set_status_code(TStatusCode::NOT_FOUND);
@@ -271,9 +270,11 @@ void PInternalServiceImpl::open_stream_sink(google::protobuf::RpcController* con
             response->release_status();
             return;
         }
-        tablet->tablet_schema()->to_schema_pb(response->mutable_tablet_schema());
-        response->set_enable_unique_key_merge_on_write(tablet->enable_unique_key_merge_on_write());
-    }*/
+        auto resp = response->add_tablet_schemas();
+        resp->set_index_id(req.index_id());
+        resp->set_enable_unique_key_merge_on_write(tablet->enable_unique_key_merge_on_write());
+        tablet->tablet_schema()->to_schema_pb(resp->mutable_tablet_schema());
+    }
 
     ExecEnv* env = ExecEnv::GetInstance();
 

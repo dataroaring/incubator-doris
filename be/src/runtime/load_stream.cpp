@@ -91,7 +91,7 @@ Status TabletStream::append_data(const PStreamHeader& header, butil::IOBuf* data
         if (segid + 1 > origin_size) {
             _segids_mapping[sender_id].resize(segid + 1, std::numeric_limits<uint32_t>::max());
             // handle concurrency.
-            for (ssize_t index = origin_size; index <= segid; index++) {
+            for (size_t index = origin_size; index <= segid; index++) {
                 _segids_mapping[sender_id][index] = _next_segid;
                 _next_segid++;
                 LOG(INFO) << "sender_id=" << sender_id <<", segid=" << index << " to " << " segid=" << _next_segid - 1;
@@ -99,16 +99,18 @@ Status TabletStream::append_data(const PStreamHeader& header, butil::IOBuf* data
         }
     }
 
-    // Each sender sends data in one segment sequential, so we also does not
+    // Each sender sends data in one segment sequential, so we also do not
     // need a lock here.
     bool eos = header.segment_eos();
     uint32_t new_segid = _segids_mapping[sender_id][segid];
     DCHECK(new_segid != std::numeric_limits<uint32_t>::max());
     butil::IOBuf buf = data->movable();
-    auto flush_func = [this, new_segid, eos, buf]() {
+    auto flush_func = [this, new_segid, eos, buf, header]() {
          auto st = _rowset_builder->append_data(new_segid, buf);
          if (eos && st.ok()) {
-             st = _rowset_builder->close_segment(new_segid);
+             DCHECK(header.has_segment_statistics());
+             auto stat = std::make_shared<SegmentStatistics>(header.segment_statistics());
+             st = _rowset_builder->close_segment(new_segid, stat);
          }
 
          if (!st.ok() && _failed_st->ok()) {
@@ -171,7 +173,7 @@ LoadStream::~LoadStream() {
     LOG(INFO) << "load stream is deconstructed " << *this;
 }
 
-Status LoadStream::init(const PTabletWriterOpenRequest* request) {
+Status LoadStream::init(const POpenStreamSinkRequest* request) {
     _num_senders = request->num_senders();
     _num_working_senders = request->num_senders();
     _senders_status.resize(_num_senders, true);
@@ -221,7 +223,7 @@ Status LoadStream::close(uint32_t sender_id, std::vector<int64_t>* success_table
 void LoadStream::_report_result(StreamId stream, Status& st, std::vector<int64_t>* success_tablet_ids,
                                 std::vector<int64_t>* failed_tablet_ids) {
     LOG(INFO) << "OOXXOO report result, success tablet num " << success_tablet_ids->size()
-              << "failed tablet num " << failed_tablet_ids->size();
+              << ", failed tablet num " << failed_tablet_ids->size();
     // TODO
     butil::IOBuf buf;
     PWriteStreamSinkResponse response;
@@ -282,6 +284,7 @@ Status LoadStream::_append_data(const PStreamHeader& header, butil::IOBuf* data)
 //TODO trigger build meta when last segment of all cluster is closed
 int LoadStream::on_received_messages(StreamId id, butil::IOBuf* const messages[],
                                      size_t size) {
+    std::shared_ptr<SegmentStatistics> stat = nullptr;
     LOG(INFO) << "OOXXOO on_received_messages " << id << " " << size;
     for (size_t i = 0; i < size; ++i) {
         // step 1: parse header

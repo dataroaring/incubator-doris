@@ -46,6 +46,7 @@
 #include "common/object_pool.h"
 #include "common/status.h"
 #include "exec/tablet_info.h"
+#include "io/fs/stream_sink_file_writer.h"
 #include "olap/delta_writer_v2.h"
 #include "runtime/define_primitive_type.h"
 #include "runtime/descriptors.h"
@@ -88,6 +89,8 @@
 #include "vec/data_types/data_type_nullable.h"
 #include "vec/exprs/vexpr.h"
 #include "vec/exprs/vexpr_context.h"
+#include "vec/sink/vtablet_block_convertor.h"
+#include "vec/sink/vtablet_finder.h"
 
 namespace doris {
 class TExpr;
@@ -105,29 +108,39 @@ int StreamSinkHandler::on_received_messages(brpc::StreamId id, butil::IOBuf* con
 
         Status st(response.status());
 
-        LOG(INFO) << "received write stream sink response from backend " << backend_id
-                  << ", status " << st << ", tablet_id(" << response.tablet_id() << "), index_id("
-                  << response.index_id() << ")";
+        std::stringstream ss;
+        ss << "received write stream sink response from backend " << backend_id << ", status: "
+           << st << ", success tablet ids:";
+        for (auto tablet_id : response.success_tablet_ids()) {
+            ss << " " << tablet_id;
+        }
+        ss << ", failed tablet ids:";
+        for (auto tablet_id : response.failed_tablet_ids()) {
+            ss << " " << tablet_id;
+        }
+        LOG(INFO) << ss.str();
 
         int replica = _sink->_num_replicas;
 
-        auto key = std::make_pair(response.tablet_id(), response.index_id());
-
-        if (st.ok()) {
+        {
             std::lock_guard<bthread::Mutex> l(_sink->_tablet_success_map_mutex);
-            if (_sink->_tablet_success_map.count(key) == 0) {
-                _sink->_tablet_success_map.insert({key, {}});
+            for (auto tablet_id : response.success_tablet_ids()) {
+                if (_sink->_tablet_success_map.count(tablet_id) == 0) {
+                    _sink->_tablet_success_map.insert({tablet_id, {}});
+                }
+                _sink->_tablet_success_map[tablet_id].push_back(backend_id);
             }
-            _sink->_tablet_success_map[key].push_back(backend_id);
-        } else {
-            LOG(WARNING) << "stream sink failed: " << response.error_msg();
+        }
+        {
             std::lock_guard<bthread::Mutex> l(_sink->_tablet_failure_map_mutex);
-            if (_sink->_tablet_failure_map.count(key) == 0) {
-                _sink->_tablet_failure_map.insert({key, {}});
-            }
-            _sink->_tablet_failure_map[key].push_back(backend_id);
-            if (_sink->_tablet_failure_map[key].size() * 2 >= replica) {
-                // TODO: _sink->cancel();
+            for (auto tablet_id : response.failed_tablet_ids()) {
+                if (_sink->_tablet_failure_map.count(tablet_id) == 0) {
+                    _sink->_tablet_failure_map.insert({tablet_id, {}});
+                }
+                _sink->_tablet_failure_map[tablet_id].push_back(backend_id);
+                if (_sink->_tablet_failure_map[tablet_id].size() * 2 >= replica) {
+                    // TODO: _sink->cancel();
+                }
             }
         }
     }
@@ -138,7 +151,7 @@ void StreamSinkHandler::on_closed(brpc::StreamId id) {}
 
 VOlapTableSinkV2::VOlapTableSinkV2(ObjectPool* pool, const RowDescriptor& row_desc,
                                    const std::vector<TExpr>& texprs, Status* status)
-        : _pool(pool), _input_row_desc(row_desc), _filter_bitmap(1024) {
+        : _pool(pool), _input_row_desc(row_desc) {
     // From the thrift expressions create the real exprs.
     *status = vectorized::VExpr::create_expr_trees(texprs, _output_vexpr_ctxs);
     _name = "VOlapTableSinkV2";
@@ -179,14 +192,16 @@ Status VOlapTableSinkV2::init(const TDataSink& t_sink) {
     // if distributed column list is empty, we can ensure that tablet is with random distribution info
     // and if load_to_single_tablet is set and set to true, we should find only one tablet in one partition
     // for the whole olap table sink
+    auto find_tablet_mode = OlapTabletFinder::FindTabletMode::FIND_TABLET_EVERY_ROW;
     if (table_sink.partition.distributed_columns.empty()) {
         if (table_sink.__isset.load_to_single_tablet && table_sink.load_to_single_tablet) {
-            findTabletMode = FindTabletMode::FIND_TABLET_EVERY_SINK;
+            find_tablet_mode = OlapTabletFinder::FindTabletMode::FIND_TABLET_EVERY_SINK;
         } else {
-            findTabletMode = FindTabletMode::FIND_TABLET_EVERY_BATCH;
+            find_tablet_mode = OlapTabletFinder::FindTabletMode::FIND_TABLET_EVERY_BATCH;
         }
     }
     _vpartition = _pool->add(new doris::VOlapTablePartitionParam(_schema, table_sink.partition));
+    _tablet_finder = std::make_unique<OlapTabletFinder>(_vpartition, find_tablet_mode);
     return _vpartition->init();
 }
 
@@ -216,6 +231,7 @@ Status VOlapTableSinkV2::prepare(RuntimeState* state) {
         return Status::InternalError("unknown destination tuple descriptor");
     }
 
+    _block_convertor = std::make_unique<OlapTableBlockConvertor>(_output_tuple_desc);
     _output_row_desc = _pool->add(new RowDescriptor(_output_tuple_desc, false));
 
     // add all counter
@@ -259,7 +275,6 @@ Status VOlapTableSinkV2::open(RuntimeState* state) {
     _stream_pool_for_node = std::make_shared<StreamPoolForNode>();
     _node_id_for_stream = std::make_shared<NodeIdForStream>();
     _delta_writer_for_tablet = std::make_shared<DeltaWriterForTablet>();
-    _delta_writer_for_tablet_mutex = std::make_shared<bthread::Mutex>();
     RETURN_IF_ERROR(_init_stream_pools());
 
     return Status::OK();
@@ -296,26 +311,38 @@ Status VOlapTableSinkV2::_init_stream_pool(const NodeInfo& node_info, StreamPool
                   << node_info.host << ":" << node_info.brpc_port << ")";
         const auto& stub = _state->exec_env()->brpc_internal_client_cache()->get_client(
                 node_info.host, node_info.brpc_port);
-        PTabletWriterOpenRequest request;
-        /*request.set_allocated_id(&_load_id);
-        request.set_tablet_id(_location->any_tablet_id());
+        POpenStreamSinkRequest request;
+        request.set_allocated_id(&_load_id);
+        request.set_num_senders(_num_senders);
+        request.set_txn_id(_txn_id);
         request.set_backend_id(node_info.id);
-        */
+        request.set_allocated_schema(_schema->to_protobuf());
+        for (const auto& partition : _vpartition->get_partitions()) {
+            for (const auto& index : partition->indexes) {
+                auto req = request.add_tablets();
+                req->set_tablet_id(index.tablets[0]);
+                req->set_index_id(index.index_id);
+            }
+        }
         POpenStreamSinkResponse response;
         stub->open_stream_sink(&cntl, &request, &response, nullptr);
-        // TODO: this is a debug log
-        /*LOG(INFO) << "Got tablet schema of " << request.tablet_id() << " from backend "
-                  << node_info.id << ": num_short_key_columns = "
-                  << response.tablet_schema().num_short_key_columns()
-                  << ", num_rows_per_row_block = "
-                  << response.tablet_schema().num_rows_per_row_block()
-                  << ", enable_unique_key_merge_on_write = "
-                  << response.enable_unique_key_merge_on_write();
-                  */
-        _tablet_schema = std::make_shared<TabletSchema>();
-        _tablet_schema->init_from_pb(response.tablet_schema());
-        _enable_unique_key_merge_on_write = response.enable_unique_key_merge_on_write();
+        for (const auto& resp : response.tablet_schemas()) {
+            auto tablet_schema = std::make_shared<TabletSchema>();
+            tablet_schema->init_from_pb(resp.tablet_schema());
+            _tablet_schema_for_index.insert({resp.index_id(), tablet_schema});
+            _enable_unique_mow_for_index.insert(
+                    {resp.index_id(), resp.enable_unique_key_merge_on_write()});
+            // TODO: this is a debug log
+            LOG(INFO) << "Got tablet schema from backend "
+                    << node_info.id << ": num_short_key_columns = "
+                    << tablet_schema->num_short_key_columns()
+                    << ", num_rows_per_row_block = "
+                    << tablet_schema->num_rows_per_row_block()
+                    << ", enable_unique_key_merge_on_write = "
+                    << resp.enable_unique_key_merge_on_write();
+        }
         request.release_id();
+        request.release_schema();
         if (cntl.Failed()) {
             LOG(ERROR) << "Fail to connect stream, " << cntl.ErrorText();
             return Status::RpcError("Failed to connect stream");
@@ -325,56 +352,6 @@ Status VOlapTableSinkV2::_init_stream_pool(const NodeInfo& node_info, StreamPool
     return Status::OK();
 }
 
-Status VOlapTableSinkV2::find_tablet(RuntimeState* state, vectorized::Block* block, int row_index,
-                                     const VOlapTablePartition** partition, uint32_t& tablet_index,
-                                     bool& stop_processing, bool& is_continue) {
-    Status status = Status::OK();
-    *partition = nullptr;
-    tablet_index = 0;
-    BlockRow block_row;
-    block_row = {block, row_index};
-    if (!_vpartition->find_partition(&block_row, partition)) {
-        RETURN_IF_ERROR(state->append_error_msg_to_file(
-                []() -> std::string { return ""; },
-                [&]() -> std::string {
-                    fmt::memory_buffer buf;
-                    fmt::format_to(buf, "no partition for this tuple. tuple={}",
-                                   block->dump_data(row_index, 1));
-                    return fmt::to_string(buf);
-                },
-                &stop_processing));
-        _number_filtered_rows++;
-        if (stop_processing) {
-            return Status::EndOfFile("Encountered unqualified data, stop processing");
-        }
-        is_continue = true;
-        return status;
-    }
-    if (!(*partition)->is_mutable) {
-        _number_immutable_partition_filtered_rows++;
-        is_continue = true;
-        return status;
-    }
-    if ((*partition)->num_buckets <= 0) {
-        std::stringstream ss;
-        ss << "num_buckets must be greater than 0, num_buckets=" << (*partition)->num_buckets;
-        return Status::InternalError(ss.str());
-    }
-    _partition_ids.emplace((*partition)->id);
-    if (findTabletMode != FindTabletMode::FIND_TABLET_EVERY_ROW) {
-        if (_partition_to_tablet_map.find((*partition)->id) == _partition_to_tablet_map.end()) {
-            tablet_index = _vpartition->find_tablet(&block_row, **partition);
-            _partition_to_tablet_map.emplace((*partition)->id, tablet_index);
-        } else {
-            tablet_index = _partition_to_tablet_map[(*partition)->id];
-        }
-    } else {
-        tablet_index = _vpartition->find_tablet(&block_row, **partition);
-    }
-
-    return status;
-}
-
 void VOlapTableSinkV2::_generate_rows_for_tablet(RowsForTablet& rows_for_tablet,
                                                  const VOlapTablePartition* partition,
                                                  uint32_t tablet_index, int row_idx,
@@ -382,11 +359,13 @@ void VOlapTableSinkV2::_generate_rows_for_tablet(RowsForTablet& rows_for_tablet,
     // Generate channel payload for sinking data to each tablet
     for (const auto& index : partition->indexes) {
         auto tablet_id = index.tablets[tablet_index];
-        auto key = TabletKey {partition->id, index.index_id, tablet_id};
-        if (rows_for_tablet.count(key) == 0) {
-            rows_for_tablet.insert({key, std::vector<int32_t>()});
+        if (rows_for_tablet.count(tablet_id) == 0) {
+            Rows rows;
+            rows.partition_id = partition->id;
+            rows.index_id = index.index_id;
+            rows_for_tablet.insert({tablet_id, rows});
         }
-        rows_for_tablet[key].push_back(row_idx);
+        rows_for_tablet[tablet_id].row_idxes.push_back(row_idx);
         _number_output_rows += row_cnt;
     }
 }
@@ -429,51 +408,30 @@ Status VOlapTableSinkV2::send(RuntimeState* state, vectorized::Block* input_bloc
         }
     }
 
-    auto block = vectorized::Block::create_shared(input_block->get_columns_with_type_and_name());
-    if (!_output_vexpr_ctxs.empty()) {
-        // Do vectorized expr here to speed up load
-        RETURN_IF_ERROR(vectorized::VExprContext::get_output_block_after_execute_exprs(
-                _output_vexpr_ctxs, *input_block, block.get()));
-    }
+    std::shared_ptr<vectorized::Block> block;
+    bool has_filtered_rows = false;
+    RETURN_IF_ERROR(_block_convertor->validate_and_convert_block(
+            state, input_block, block, _output_vexpr_ctxs, has_filtered_rows));
 
-    // remove ownership of columns from input_block
+    // clear and release the references of columns
     input_block->clear();
-
-    auto num_rows = block->rows();
-    int filtered_rows = 0;
-    {
-        SCOPED_RAW_TIMER(&_validate_data_ns);
-        _filter_bitmap.Reset(block->rows());
-        bool stop_processing = false;
-        RETURN_IF_ERROR(_validate_data(state, block.get(), &_filter_bitmap, &filtered_rows,
-                                       &stop_processing));
-        _number_filtered_rows += filtered_rows;
-        if (stop_processing) {
-            // should be returned after updating "_number_filtered_rows", to make sure that load job can be cancelled
-            // because of "data unqualified"
-            return Status::EndOfFile("Encountered unqualified data, stop processing");
-        }
-        _convert_to_dest_desc_block(block.get());
-    }
 
     SCOPED_RAW_TIMER(&_send_data_ns);
     // This is just for passing compilation.
     bool stop_processing = false;
     RowsForTablet rows_for_tablet;
-    if (findTabletMode == FIND_TABLET_EVERY_BATCH) {
-        // Recaculate is needed
-        _partition_to_tablet_map.clear();
-    }
+    _tablet_finder->clear_for_new_batch();
     _row_distribution_watch.start();
+    auto num_rows = block->rows();
     for (int i = 0; i < num_rows; ++i) {
-        if (UNLIKELY(filtered_rows) > 0 && _filter_bitmap.Get(i)) {
+        if (UNLIKELY(has_filtered_rows) && _block_convertor->filter_bitmap().Get(i)) {
             continue;
         }
         const VOlapTablePartition* partition = nullptr;
         bool is_continue = false;
         uint32_t tablet_index = 0;
-        RETURN_IF_ERROR(find_tablet(state, block.get(), i, &partition, tablet_index,
-                                    stop_processing, is_continue));
+        RETURN_IF_ERROR(_tablet_finder->find_tablet(state, block.get(), i, &partition, tablet_index,
+                                                    stop_processing, is_continue));
         if (is_continue) {
             continue;
         }
@@ -482,79 +440,67 @@ Status VOlapTableSinkV2::send(RuntimeState* state, vectorized::Block* input_bloc
     _row_distribution_watch.stop();
 
     // For each tablet, send its rows from block to delta writer
-    for (const auto& entry : rows_for_tablet) {
-        bthread_t th;
-        auto closure = new WriteMemtableTaskClosure {};
-        closure->sink = this;
-        closure->block = block;
-        closure->partition_id = entry.first.partition_id;
-        closure->index_id = entry.first.index_id;
-        closure->tablet_id = entry.first.tablet_id;
-        closure->row_idxes = entry.second;
-        RETURN_IF_ERROR(_select_streams(closure->tablet_id, closure->streams));
-        _opened_tablets.insert(std::make_pair(closure->tablet_id, closure->index_id));
+    for (const auto& [tablet_id, rows] : rows_for_tablet) {
+        std::vector<brpc::StreamId> streams;
+        RETURN_IF_ERROR(_select_streams(tablet_id, streams));
+        _opened_tablets.insert(tablet_id);
         auto cnt = _flying_task_count.fetch_add(1) + 1;
-        DLOG(INFO) << "Creating WriteMemtableTask for Tablet(tablet id: " << closure->tablet_id
-                   << ", index id: " << closure->index_id << "), flying task count: " << cnt;
-        bthread_start_background(&th, nullptr, _write_memtable_task, closure);
-        _write_memtable_threads.push_back(th);
+        VLOG_DEBUG << "Creating WriteMemtableTask for Tablet(tablet id: " << tablet_id
+                   << ", index id: " << rows.index_id << "), flying task count: " << cnt;
+        RETURN_IF_ERROR(_write_memtable(block, tablet_id, rows, streams));
     }
 
     return Status::OK();
 }
 
-void* VOlapTableSinkV2::_write_memtable_task(void* closure) {
-    auto ctx = static_cast<WriteMemtableTaskClosure*>(closure);
-    VOlapTableSinkV2* sink = ctx->sink;
+Status VOlapTableSinkV2::_write_memtable(std::shared_ptr<vectorized::Block> block,
+                                         int64_t tablet_id, const Rows& rows,
+                                         const std::vector<brpc::StreamId>& streams) {
     DeltaWriterV2* delta_writer = nullptr;
     {
-        std::lock_guard<bthread::Mutex> l(*sink->_delta_writer_for_tablet_mutex);
-        auto key = std::make_pair(ctx->tablet_id, ctx->index_id);
-        auto it = sink->_delta_writer_for_tablet->find(key);
-        if (it == sink->_delta_writer_for_tablet->end()) {
-            DLOG(INFO) << "Creating DeltaWriterV2 for Tablet(tablet id: " << ctx->tablet_id
-                       << ", index id: " << ctx->index_id << ")";
+        auto it = _delta_writer_for_tablet->find(tablet_id);
+        if (it == _delta_writer_for_tablet->end()) {
+            VLOG_DEBUG << "Creating DeltaWriterV2 for Tablet(tablet id: " << tablet_id
+                       << ", index id: " << rows.index_id << ")";
             DeltaWriterV2::WriteRequest wrequest;
-            wrequest.partition_id = ctx->partition_id;
-            wrequest.index_id = ctx->index_id;
-            wrequest.tablet_id = ctx->tablet_id;
+            wrequest.partition_id = rows.partition_id;
+            wrequest.index_id = rows.index_id;
+            wrequest.tablet_id = tablet_id;
             wrequest.write_type = DeltaWriterV2::WriteType::LOAD;
-            wrequest.txn_id = sink->_txn_id;
-            wrequest.load_id = sink->_load_id;
-            wrequest.tuple_desc = sink->_output_tuple_desc;
-            wrequest.is_high_priority = sink->_is_high_priority;
-            wrequest.table_schema_param = sink->_schema.get();
-            wrequest.tablet_schema = sink->_tablet_schema;
-            wrequest.enable_unique_key_merge_on_write = sink->_enable_unique_key_merge_on_write;
-            for (auto& index : sink->_schema->indexes()) {
-                if (index->index_id == ctx->index_id) {
+            wrequest.txn_id = _txn_id;
+            wrequest.load_id = _load_id;
+            wrequest.tuple_desc = _output_tuple_desc;
+            wrequest.is_high_priority = _is_high_priority;
+            wrequest.table_schema_param = _schema.get();
+            wrequest.tablet_schema = _tablet_schema_for_index[rows.index_id];
+            wrequest.enable_unique_key_merge_on_write = _enable_unique_mow_for_index[rows.index_id];
+            for (auto& index : _schema->indexes()) {
+                if (index->index_id == rows.index_id) {
                     wrequest.slots = &index->slots;
                     wrequest.schema_hash = index->schema_hash;
                     break;
                 }
             }
-            DeltaWriterV2::open(&wrequest, &delta_writer, sink->_profile, sink->_load_id);
-            // sink->_table_sink_v2_mgr->register_writer(std::shared_ptr<DeltaWriterV2>(delta_writer));
-            for (auto stream : ctx->streams) {
+            DeltaWriterV2::open(&wrequest, &delta_writer, _profile, _load_id);
+            // _table_sink_v2_mgr->register_writer(std::shared_ptr<DeltaWriterV2>(delta_writer));
+            for (auto stream : streams) {
                 delta_writer->add_stream(stream);
             }
-            delta_writer->register_flying_memtable_counter(sink->_flying_memtable_counter);
-            sink->_delta_writer_for_tablet->insert(
-                    {key, std::unique_ptr<DeltaWriterV2>(delta_writer)});
+            delta_writer->register_flying_memtable_counter(_flying_memtable_counter);
+            _delta_writer_for_tablet->insert(
+                    {tablet_id, std::unique_ptr<DeltaWriterV2>(delta_writer)});
         } else {
-            DLOG(INFO) << "Reusing DeltaWriterV2 for Tablet(tablet id: " << ctx->tablet_id
-                       << ", index id: " << ctx->index_id << ")";
+            VLOG_DEBUG << "Reusing DeltaWriterV2 for Tablet(tablet id: " << tablet_id
+                       << ", index id: " << rows.index_id << ")";
             delta_writer = it->second.get();
         }
     }
-    // sink->_table_sink_v2_mgr->handle_memtable_flush();
-    auto st = delta_writer->write(ctx->block.get(), ctx->row_idxes, false);
-    auto cnt = sink->_flying_task_count.fetch_sub(1) - 1;
-    DLOG(INFO) << "Finished writing Tablet(tablet id: " << ctx->tablet_id
-               << ", index id: " << ctx->index_id << "), flying task count: " << cnt;
-    delete ctx;
-    DCHECK_EQ(st, Status::OK()) << "DeltaWriterV2::write failed";
-    return nullptr;
+    // _table_sink_v2_mgr->handle_memtable_flush();
+    auto st = delta_writer->write(block.get(), rows.row_idxes, false);
+    auto cnt = _flying_task_count.fetch_sub(1) - 1;
+    VLOG_DEBUG << "Finished writing Tablet(tablet id: " << tablet_id
+               << ", index id: " << rows.index_id << "), flying task count: " << cnt;
+    return st;
 }
 
 Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
@@ -571,18 +517,12 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
 
         COUNTER_SET(_input_rows_counter, _number_input_rows);
         COUNTER_SET(_output_rows_counter, _number_output_rows);
-        COUNTER_SET(_filtered_rows_counter, _number_filtered_rows);
+        COUNTER_SET(_filtered_rows_counter,
+                    _block_convertor->num_filtered_rows() + _tablet_finder->num_filtered_rows());
         COUNTER_SET(_send_data_timer, _send_data_ns);
         COUNTER_SET(_row_distribution_timer, (int64_t)_row_distribution_watch.elapsed_time());
         COUNTER_SET(_filter_timer, _filter_ns);
-        COUNTER_SET(_validate_data_timer, _validate_data_ns);
-
-        // join all write memtable tasks
-        for (auto& th : _write_memtable_threads) {
-            if (th) {
-                bthread_join(th, nullptr);
-            }
-        }
+        COUNTER_SET(_validate_data_timer, _block_convertor->validate_data_ns());
 
         // close all delta writers
         if (_delta_writer_for_tablet.use_count() == 1) {
@@ -595,6 +535,12 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
             }
         }
         _delta_writer_for_tablet.reset();
+
+        for (const auto& entry : *_stream_pool_for_node) {
+            for (auto stream_id : entry.second) {
+                RETURN_IF_ERROR(_close_load(stream_id));
+            }
+        }
 
         for (const auto& tablet : _opened_tablets) {
             bool should_wait = true;
@@ -609,10 +555,9 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
                     std::lock_guard<bthread::Mutex> l(_tablet_failure_map_mutex);
                     failed_replicas = _tablet_failure_map[tablet].size();
                 }
-                LOG(INFO) << "expected " << _num_replicas
-                          << " replicas for tablet [tablet id: " << tablet.first
-                          << ", index id: " << tablet.second << "], got " << success_replicas
-                          << " success replicas, " << failed_replicas << " failed replicas";
+                LOG(INFO) << "expected " << _num_replicas << " replicas for tablet " << tablet
+                          << ", got " << success_replicas << " success replicas, "
+                          << failed_replicas << " failed replicas";
                 should_wait = success_replicas + failed_replicas < _num_replicas &&
                               failed_replicas * 2 < _num_replicas;
                 if (should_wait) {
@@ -633,10 +578,10 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
         _stream_pool_for_node.reset();
 
         std::vector<TTabletCommitInfo> tablet_commit_infos;
-        for (auto& entry : _tablet_success_map) {
-            for (int64_t be_id : entry.second) {
+        for (auto& [tablet_id, backends] : _tablet_success_map) {
+            for (int64_t be_id : backends) {
                 TTabletCommitInfo commit_info;
-                commit_info.tabletId = entry.first.first;
+                commit_info.tabletId = tablet_id;
                 commit_info.backendId = be_id;
                 tablet_commit_infos.emplace_back(std::move(commit_info));
             }
@@ -649,8 +594,10 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
         int64_t num_rows_load_total = _number_input_rows + state->num_rows_load_filtered() +
                                       state->num_rows_load_unselected();
         state->set_num_rows_load_total(num_rows_load_total);
-        state->update_num_rows_load_filtered(_number_filtered_rows);
-        state->update_num_rows_load_unselected(_number_immutable_partition_filtered_rows);
+        state->update_num_rows_load_filtered(_block_convertor->num_filtered_rows() +
+                                             _tablet_finder->num_filtered_rows());
+        state->update_num_rows_load_unselected(
+                _tablet_finder->num_immutable_partition_filtered_rows());
 
         // print log of add batch time of all node, for tracing load performance easily
         std::stringstream ss;
@@ -662,12 +609,6 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
         LOG(INFO) << "finished to close olap table sink. load_id=" << print_id(_load_id)
                   << ", txn_id=" << _txn_id
                   << ", canceled all node channels due to error: " << status;
-
-        for (auto& th : _write_memtable_threads) {
-            if (th) {
-                bthread_stop(th);
-            }
-        }
     }
 
     _close_status = status;
@@ -675,350 +616,17 @@ Status VOlapTableSinkV2::close(RuntimeState* state, Status exec_status) {
     return status;
 }
 
-template <bool is_min>
-DecimalV2Value VOlapTableSinkV2::_get_decimalv2_min_or_max(const TypeDescriptor& type) {
-    std::map<std::pair<int, int>, DecimalV2Value>* pmap = nullptr;
-    if constexpr (is_min) {
-        pmap = &_min_decimalv2_val;
-    } else {
-        pmap = &_max_decimalv2_val;
-    }
-
-    // found
-    auto iter = pmap->find({type.precision, type.scale});
-    if (iter != pmap->end()) {
-        return iter->second;
-    }
-
-    // save min or max DecimalV2Value for next time
-    DecimalV2Value value;
-    if constexpr (is_min) {
-        value.to_min_decimal(type.precision, type.scale);
-    } else {
-        value.to_max_decimal(type.precision, type.scale);
-    }
-    pmap->emplace(std::pair<int, int> {type.precision, type.scale}, value);
-    return value;
-}
-
-template <typename DecimalType, bool IsMin>
-DecimalType VOlapTableSinkV2::_get_decimalv3_min_or_max(const TypeDescriptor& type) {
-    std::map<int, typename DecimalType::NativeType>* pmap = nullptr;
-    if constexpr (std::is_same_v<DecimalType, vectorized::Decimal32>) {
-        pmap = IsMin ? &_min_decimal32_val : &_max_decimal32_val;
-    } else if constexpr (std::is_same_v<DecimalType, vectorized::Decimal64>) {
-        pmap = IsMin ? &_min_decimal64_val : &_max_decimal64_val;
-    } else {
-        pmap = IsMin ? &_min_decimal128_val : &_max_decimal128_val;
-    }
-
-    // found
-    auto iter = pmap->find(type.precision);
-    if (iter != pmap->end()) {
-        return iter->second;
-    }
-
-    typename DecimalType::NativeType value;
-    if constexpr (IsMin) {
-        value = vectorized::min_decimal_value<DecimalType>(type.precision);
-    } else {
-        value = vectorized::max_decimal_value<DecimalType>(type.precision);
-    }
-    pmap->emplace(type.precision, value);
-    return value;
-}
-
-Status VOlapTableSinkV2::_validate_column(RuntimeState* state, const TypeDescriptor& type,
-                                          bool is_nullable, vectorized::ColumnPtr column,
-                                          size_t slot_index, Bitmap* filter_bitmap,
-                                          bool* stop_processing, fmt::memory_buffer& error_prefix,
-                                          vectorized::IColumn::Permutation* rows) {
-    DCHECK((rows == nullptr) || (rows->size() == column->size()));
-    fmt::memory_buffer error_msg;
-    auto set_invalid_and_append_error_msg = [&](int row) {
-        filter_bitmap->Set(row, true);
-        auto ret = state->append_error_msg_to_file([]() -> std::string { return ""; },
-                                                   [&error_prefix, &error_msg]() -> std::string {
-                                                       return fmt::to_string(error_prefix) +
-                                                              fmt::to_string(error_msg);
-                                                   },
-                                                   stop_processing);
-        error_msg.clear();
-        return ret;
-    };
-
-    auto column_ptr = vectorized::check_and_get_column<vectorized::ColumnNullable>(*column);
-    auto& real_column_ptr = column_ptr == nullptr ? column : (column_ptr->get_nested_column_ptr());
-    auto null_map = column_ptr == nullptr ? nullptr : column_ptr->get_null_map_data().data();
-    auto need_to_validate = [&null_map, &filter_bitmap](size_t j, size_t row) {
-        return !filter_bitmap->Get(row) && (null_map == nullptr || null_map[j] == 0);
-    };
-
-    ssize_t last_invalid_row = -1;
-    switch (type.type) {
-    case TYPE_CHAR:
-    case TYPE_VARCHAR:
-    case TYPE_STRING: {
-        const auto column_string =
-                assert_cast<const vectorized::ColumnString*>(real_column_ptr.get());
-
-        size_t limit = config::string_type_length_soft_limit_bytes;
-        // when type.len is negative, std::min will return overflow value, so we need to check it
-        if (type.len > 0) {
-            limit = std::min(config::string_type_length_soft_limit_bytes, type.len);
-        }
-        for (size_t j = 0; j < column->size(); ++j) {
-            auto row = rows ? (*rows)[j] : j;
-            if (row == last_invalid_row) {
-                continue;
-            }
-            if (need_to_validate(j, row)) {
-                auto str_val = column_string->get_data_at(j);
-                bool invalid = str_val.size > limit;
-                if (invalid) {
-                    last_invalid_row = row;
-                    if (str_val.size > type.len) {
-                        fmt::format_to(error_msg, "{}",
-                                       "the length of input is too long than schema. ");
-                        fmt::format_to(error_msg, "first 32 bytes of input str: [{}] ",
-                                       str_val.to_prefix(32));
-                        fmt::format_to(error_msg, "schema length: {}; ", type.len);
-                        fmt::format_to(error_msg, "actual length: {}; ", str_val.size);
-                    } else if (str_val.size > limit) {
-                        fmt::format_to(error_msg, "{}",
-                                       "the length of input string is too long than vec schema. ");
-                        fmt::format_to(error_msg, "first 32 bytes of input str: [{}] ",
-                                       str_val.to_prefix(32));
-                        fmt::format_to(error_msg, "schema length: {}; ", type.len);
-                        fmt::format_to(error_msg, "limit length: {}; ", limit);
-                        fmt::format_to(error_msg, "actual length: {}; ", str_val.size);
-                    }
-                    RETURN_IF_ERROR(set_invalid_and_append_error_msg(row));
-                }
-            }
-        }
-        break;
-    }
-    case TYPE_JSONB: {
-        const auto column_string =
-                assert_cast<const vectorized::ColumnString*>(real_column_ptr.get());
-        for (size_t j = 0; j < column->size(); ++j) {
-            if (!filter_bitmap->Get(j)) {
-                if (is_nullable && column_ptr && column_ptr->is_null_at(j)) {
-                    continue;
-                }
-                auto str_val = column_string->get_data_at(j);
-                bool invalid = str_val.size == 0;
-                if (invalid) {
-                    error_msg.clear();
-                    fmt::format_to(error_msg, "{}", "jsonb with size 0 is invalid");
-                    RETURN_IF_ERROR(set_invalid_and_append_error_msg(j));
-                }
-            }
-        }
-        break;
-    }
-    case TYPE_DECIMALV2: {
-        auto column_decimal = const_cast<vectorized::ColumnDecimal<vectorized::Decimal128>*>(
-                assert_cast<const vectorized::ColumnDecimal<vectorized::Decimal128>*>(
-                        real_column_ptr.get()));
-        const auto& max_decimalv2 = _get_decimalv2_min_or_max<false>(type);
-        const auto& min_decimalv2 = _get_decimalv2_min_or_max<true>(type);
-        for (size_t j = 0; j < column->size(); ++j) {
-            auto row = rows ? (*rows)[j] : j;
-            if (row == last_invalid_row) {
-                continue;
-            }
-            if (need_to_validate(j, row)) {
-                auto dec_val = binary_cast<vectorized::Int128, DecimalV2Value>(
-                        column_decimal->get_data()[j]);
-                bool invalid = false;
-
-                if (dec_val.greater_than_scale(type.scale)) {
-                    auto code = dec_val.round(&dec_val, type.scale, HALF_UP);
-                    column_decimal->get_data()[j] = dec_val.value();
-
-                    if (code != E_DEC_OK) {
-                        fmt::format_to(error_msg, "round one decimal failed.value={}; ",
-                                       dec_val.to_string());
-                        invalid = true;
-                    }
-                }
-                if (dec_val > max_decimalv2 || dec_val < min_decimalv2) {
-                    fmt::format_to(error_msg, "{}", "decimal value is not valid for definition");
-                    fmt::format_to(error_msg, ", value={}", dec_val.to_string());
-                    fmt::format_to(error_msg, ", precision={}, scale={}", type.precision,
-                                   type.scale);
-                    fmt::format_to(error_msg, ", min={}, max={}; ", min_decimalv2.to_string(),
-                                   max_decimalv2.to_string());
-                    invalid = true;
-                }
-
-                if (invalid) {
-                    last_invalid_row = row;
-                    RETURN_IF_ERROR(set_invalid_and_append_error_msg(row));
-                }
-            }
-        }
-        break;
-    }
-    case TYPE_DECIMAL32: {
-#define CHECK_VALIDATION_FOR_DECIMALV3(ColumnDecimalType, DecimalType)                             \
-    auto column_decimal = const_cast<vectorized::ColumnDecimal<vectorized::ColumnDecimalType>*>(   \
-            assert_cast<const vectorized::ColumnDecimal<vectorized::ColumnDecimalType>*>(          \
-                    real_column_ptr.get()));                                                       \
-    const auto& max_decimal = _get_decimalv3_min_or_max<vectorized::DecimalType, false>(type);     \
-    const auto& min_decimal = _get_decimalv3_min_or_max<vectorized::DecimalType, true>(type);      \
-    for (size_t j = 0; j < column->size(); ++j) {                                                  \
-        auto row = rows ? (*rows)[j] : j;                                                          \
-        if (row == last_invalid_row) {                                                             \
-            continue;                                                                              \
-        }                                                                                          \
-        if (need_to_validate(j, row)) {                                                            \
-            auto dec_val = column_decimal->get_data()[j];                                          \
-            bool invalid = false;                                                                  \
-            if (dec_val > max_decimal || dec_val < min_decimal) {                                  \
-                fmt::format_to(error_msg, "{}", "decimal value is not valid for definition");      \
-                fmt::format_to(error_msg, ", value={}", dec_val);                                  \
-                fmt::format_to(error_msg, ", precision={}, scale={}", type.precision, type.scale); \
-                fmt::format_to(error_msg, ", min={}, max={}; ", min_decimal, max_decimal);         \
-                invalid = true;                                                                    \
-            }                                                                                      \
-            if (invalid) {                                                                         \
-                last_invalid_row = row;                                                            \
-                RETURN_IF_ERROR(set_invalid_and_append_error_msg(row));                            \
-            }                                                                                      \
-        }                                                                                          \
-    }
-        CHECK_VALIDATION_FOR_DECIMALV3(Decimal32, Decimal32);
-        break;
-    }
-    case TYPE_DECIMAL64: {
-        CHECK_VALIDATION_FOR_DECIMALV3(Decimal64, Decimal64);
-        break;
-    }
-    case TYPE_DECIMAL128I: {
-        CHECK_VALIDATION_FOR_DECIMALV3(Decimal128I, Decimal128);
-        break;
-    }
-    case TYPE_ARRAY: {
-        const auto column_array =
-                assert_cast<const vectorized::ColumnArray*>(real_column_ptr.get());
-        DCHECK(type.children.size() == 1);
-        auto nested_type = type.children[0];
-        const auto& offsets = column_array->get_offsets();
-        vectorized::IColumn::Permutation permutation(offsets.back());
-        for (size_t r = 0; r < offsets.size(); ++r) {
-            for (size_t c = offsets[r - 1]; c < offsets[r]; ++c) {
-                permutation[c] = rows ? (*rows)[r] : r;
-            }
-        }
-        fmt::format_to(error_prefix, "ARRAY type failed: ");
-        RETURN_IF_ERROR(_validate_column(state, nested_type, type.contains_nulls[0],
-                                         column_array->get_data_ptr(), slot_index, filter_bitmap,
-                                         stop_processing, error_prefix, &permutation));
-        break;
-    }
-    case TYPE_MAP: {
-        const auto column_map = assert_cast<const vectorized::ColumnMap*>(real_column_ptr.get());
-        DCHECK(type.children.size() == 2);
-        auto key_type = type.children[0];
-        auto val_type = type.children[1];
-        const auto& offsets = column_map->get_offsets();
-        vectorized::IColumn::Permutation permutation(offsets.back());
-        for (size_t r = 0; r < offsets.size(); ++r) {
-            for (size_t c = offsets[r - 1]; c < offsets[r]; ++c) {
-                permutation[c] = rows ? (*rows)[r] : r;
-            }
-        }
-        fmt::format_to(error_prefix, "MAP type failed: ");
-        RETURN_IF_ERROR(_validate_column(state, key_type, type.contains_nulls[0],
-                                         column_map->get_keys_ptr(), slot_index, filter_bitmap,
-                                         stop_processing, error_prefix, &permutation));
-        RETURN_IF_ERROR(_validate_column(state, val_type, type.contains_nulls[1],
-                                         column_map->get_values_ptr(), slot_index, filter_bitmap,
-                                         stop_processing, error_prefix, &permutation));
-        break;
-    }
-    case TYPE_STRUCT: {
-        const auto column_struct =
-                assert_cast<const vectorized::ColumnStruct*>(real_column_ptr.get());
-        DCHECK(type.children.size() == column_struct->tuple_size());
-        fmt::format_to(error_prefix, "STRUCT type failed: ");
-        for (size_t sc = 0; sc < column_struct->tuple_size(); ++sc) {
-            RETURN_IF_ERROR(_validate_column(state, type.children[sc], type.contains_nulls[sc],
-                                             column_struct->get_column_ptr(sc), slot_index,
-                                             filter_bitmap, stop_processing, error_prefix));
-        }
-        break;
-    }
-    default:
-        break;
-    }
-
-    // Dispose the column should do not contain the NULL value
-    // Only two case:
-    // 1. column is nullable but the desc is not nullable
-    // 2. desc->type is BITMAP
-    if ((!is_nullable || type == TYPE_OBJECT) && column_ptr) {
-        for (int j = 0; j < column->size(); ++j) {
-            auto row = rows ? (*rows)[j] : j;
-            if (row == last_invalid_row) {
-                continue;
-            }
-            if (null_map[j] && !filter_bitmap->Get(row)) {
-                fmt::format_to(error_msg, "null value for not null column, type={}",
-                               type.debug_string());
-                last_invalid_row = row;
-                RETURN_IF_ERROR(set_invalid_and_append_error_msg(row));
-            }
-        }
-    }
-
+Status VOlapTableSinkV2::_close_load(brpc::StreamId stream) {
+    butil::IOBuf buf;
+    PStreamHeader header;
+    header.set_allocated_load_id(&_load_id);
+    header.set_opcode(doris::PStreamHeader::CLOSE_LOAD);
+    size_t header_len = header.ByteSizeLong();
+    buf.append(reinterpret_cast<uint8_t*>(&header_len), sizeof(header_len));
+    buf.append(header.SerializeAsString());
+    io::StreamSinkFileWriter::send_with_retry(stream, buf);
+    header.release_load_id();
     return Status::OK();
-}
-
-Status VOlapTableSinkV2::_validate_data(RuntimeState* state, vectorized::Block* block,
-                                        Bitmap* filter_bitmap, int* filtered_rows,
-                                        bool* stop_processing) {
-    for (int i = 0; i < _output_tuple_desc->slots().size(); ++i) {
-        SlotDescriptor* desc = _output_tuple_desc->slots()[i];
-        block->get_by_position(i).column =
-                block->get_by_position(i).column->convert_to_full_column_if_const();
-        const auto& column = block->get_by_position(i).column;
-
-        fmt::memory_buffer error_prefix;
-        fmt::format_to(error_prefix, "column_name[{}], ", desc->col_name());
-        RETURN_IF_ERROR(_validate_column(state, desc->type(), desc->is_nullable(), column, i,
-                                         filter_bitmap, stop_processing, error_prefix));
-    }
-
-    *filtered_rows = 0;
-    for (int i = 0; i < block->rows(); ++i) {
-        *filtered_rows += filter_bitmap->Get(i);
-    }
-    return Status::OK();
-}
-
-void VOlapTableSinkV2::_convert_to_dest_desc_block(doris::vectorized::Block* block) {
-    for (int i = 0; i < _output_tuple_desc->slots().size() && i < block->columns(); ++i) {
-        SlotDescriptor* desc = _output_tuple_desc->slots()[i];
-        if (desc->is_nullable() != block->get_by_position(i).type->is_nullable()) {
-            if (desc->is_nullable()) {
-                block->get_by_position(i).type =
-                        vectorized::make_nullable(block->get_by_position(i).type);
-                block->get_by_position(i).column =
-                        vectorized::make_nullable(block->get_by_position(i).column);
-            } else {
-                block->get_by_position(i).type = assert_cast<const vectorized::DataTypeNullable&>(
-                                                         *block->get_by_position(i).type)
-                                                         .get_nested_type();
-                block->get_by_position(i).column = assert_cast<const vectorized::ColumnNullable&>(
-                                                           *block->get_by_position(i).column)
-                                                           .get_nested_column_ptr();
-            }
-        }
-    }
 }
 
 } // namespace stream_load

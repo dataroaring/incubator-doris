@@ -58,7 +58,6 @@
 #include "runtime/thread_context.h"
 #include "runtime/types.h"
 #include "runtime/vtablet_sink_v2_mgr.h"
-#include "util/bitmap.h"
 #include "util/countdown_latch.h"
 #include "util/runtime_profile.h"
 #include "util/spinlock.h"
@@ -84,21 +83,11 @@ class RefCountClosure;
 
 namespace stream_load {
 
+class OlapTableBlockConvertor;
+class OlapTabletFinder;
 class VOlapTableSinkV2;
 
-struct WriteMemtableTaskClosure {
-    VOlapTableSinkV2* sink;
-    std::shared_ptr<vectorized::Block> block;
-    int64_t partition_id;
-    int64_t index_id;
-    int64_t tablet_id;
-    std::vector<int32_t> row_idxes;
-    std::vector<brpc::StreamId> streams;
-};
-
-// <tablet_id, index_id>
-using TabletID = std::pair<int64_t, int64_t>;
-using DeltaWriterForTablet = std::unordered_map<TabletID, std::unique_ptr<DeltaWriterV2>>;
+using DeltaWriterForTablet = std::unordered_map<int64_t, std::unique_ptr<DeltaWriterV2>>;
 using StreamPool = std::vector<brpc::StreamId>;
 using StreamPoolForNode = std::unordered_map<int64_t, StreamPool>;
 using NodeIdForStream = std::unordered_map<brpc::StreamId, int64_t>;
@@ -118,20 +107,13 @@ private:
     VOlapTableSinkV2* _sink;
 };
 
-struct TabletKey {
+struct Rows {
     int64_t partition_id;
     int64_t index_id;
-    int64_t tablet_id;
-    bool operator==(const TabletKey&) const = default;
+    std::vector<int32_t> row_idxes;
 };
 
-struct TabletKeyHash {
-    std::size_t operator()(const TabletKey& k) const {
-        return (k.partition_id << 2) ^ (k.index_id << 1) ^ (k.tablet_id);
-    }
-};
-// map<TabletKey, row_idxes>
-using RowsForTablet = std::unordered_map<TabletKey, std::vector<int32_t>, TabletKeyHash>;
+using RowsForTablet = std::unordered_map<int64_t, Rows>;
 
 // Write block data to Olap Table.
 // When OlapTableSink::open() called, there will be a consumer thread running in the background.
@@ -167,35 +149,13 @@ private:
     void _generate_rows_for_tablet(RowsForTablet& rows_for_tablet,
                                    const VOlapTablePartition* partition, uint32_t tablet_index,
                                    int row_idx, size_t row_cnt);
-    static void* _write_memtable_task(void* write_ctx);
 
-    // make input data valid for OLAP table
-    // return number of invalid/filtered rows.
-    // invalid row number is set in Bitmap
-    // set stop_processing if we want to stop the whole process now.
-    Status _validate_data(RuntimeState* state, vectorized::Block* block, Bitmap* filter_bitmap,
-                          int* filtered_rows, bool* stop_processing);
-
-    template <bool is_min>
-    DecimalV2Value _get_decimalv2_min_or_max(const TypeDescriptor& type);
-
-    template <typename DecimalType, bool IsMin>
-    DecimalType _get_decimalv3_min_or_max(const TypeDescriptor& type);
-
-    Status _validate_column(RuntimeState* state, const TypeDescriptor& type, bool is_nullable,
-                            vectorized::ColumnPtr column, size_t slot_index, Bitmap* filter_bitmap,
-                            bool* stop_processing, fmt::memory_buffer& error_prefix,
-                            vectorized::IColumn::Permutation* rows = nullptr);
-
-    // some output column of output expr may have different nullable property with dest slot desc
-    // so here need to do the convert operation
-    void _convert_to_dest_desc_block(vectorized::Block* block);
-
-    Status find_tablet(RuntimeState* state, vectorized::Block* block, int row_index,
-                       const VOlapTablePartition** partition, uint32_t& tablet_index,
-                       bool& stop_processing, bool& is_continue);
+    Status _write_memtable(std::shared_ptr<vectorized::Block> block, int64_t tablet_id,
+                           const Rows& rows, const std::vector<brpc::StreamId>& streams);
 
     Status _select_streams(int64_t tablet_id, std::vector<brpc::StreamId>& streams);
+
+    Status _close_load(brpc::StreamId stream);
 
     std::shared_ptr<MemTracker> _mem_tracker;
 
@@ -221,8 +181,8 @@ private:
 
     // TODO(zc): think about cache this data
     std::shared_ptr<OlapTableSchemaParam> _schema;
-    std::shared_ptr<TabletSchema> _tablet_schema;
-    bool _enable_unique_key_merge_on_write = false;
+    std::unordered_map<int64_t, std::shared_ptr<TabletSchema>> _tablet_schema_for_index;
+    std::unordered_map<int64_t, bool> _enable_unique_mow_for_index;
     OlapTableLocationParam* _location = nullptr;
     bool _write_single_replica = false;
     OlapTableLocationParam* _slave_location = nullptr;
@@ -230,29 +190,14 @@ private:
 
     RuntimeProfile* _profile = nullptr;
 
-    std::set<int64_t> _partition_ids;
-    // only used for partition with random distribution
-    std::map<int64_t, int64_t> _partition_to_tablet_map;
+    std::unique_ptr<OlapTabletFinder> _tablet_finder;
 
-    Bitmap _filter_bitmap;
-
-    std::map<std::pair<int, int>, DecimalV2Value> _max_decimalv2_val;
-    std::map<std::pair<int, int>, DecimalV2Value> _min_decimalv2_val;
-
-    std::map<int, int32_t> _max_decimal32_val;
-    std::map<int, int32_t> _min_decimal32_val;
-    std::map<int, int64_t> _max_decimal64_val;
-    std::map<int, int64_t> _min_decimal64_val;
-    std::map<int, int128_t> _max_decimal128_val;
-    std::map<int, int128_t> _min_decimal128_val;
+    std::unique_ptr<OlapTableBlockConvertor> _block_convertor;
 
     // Stats for this
-    int64_t _validate_data_ns = 0;
     int64_t _send_data_ns = 0;
     int64_t _number_input_rows = 0;
     int64_t _number_output_rows = 0;
-    int64_t _number_filtered_rows = 0;
-    int64_t _number_immutable_partition_filtered_rows = 0;
     int64_t _filter_ns = 0;
 
     MonotonicStopWatch _row_distribution_watch;
@@ -292,15 +237,6 @@ private:
     // User can change this config at runtime, avoid it being modified during query or loading process.
     bool _transfer_large_data_by_brpc = false;
 
-    // FIND_TABLET_EVERY_ROW is used for both hash and random distribution info, which indicates that we
-    // should compute tablet index for every row
-    // FIND_TABLET_EVERY_BATCH is only used for random distribution info, which indicates that we should
-    // compute tablet index for every row batch
-    // FIND_TABLET_EVERY_SINK is only used for random distribution info, which indicates that we should
-    // only compute tablet index in the corresponding partition once for the whole time in olap table sink
-    enum FindTabletMode { FIND_TABLET_EVERY_ROW, FIND_TABLET_EVERY_BATCH, FIND_TABLET_EVERY_SINK };
-    FindTabletMode findTabletMode = FindTabletMode::FIND_TABLET_EVERY_ROW;
-
     VOlapTablePartitionParam* _vpartition = nullptr;
     vectorized::VExprContextSPtrs _output_vexpr_ctxs;
 
@@ -312,15 +248,13 @@ private:
     std::shared_ptr<NodeIdForStream> _node_id_for_stream;
     size_t _stream_index = 0;
     std::shared_ptr<DeltaWriterForTablet> _delta_writer_for_tablet;
-    std::shared_ptr<bthread::Mutex> _delta_writer_for_tablet_mutex;
-    std::vector<bthread_t> _write_memtable_threads;
     std::atomic<int32_t> _flying_task_count {0};
     std::shared_ptr<std::atomic<int32_t>> _flying_memtable_counter;
 
-    std::unordered_set<TabletID> _opened_tablets;
+    std::unordered_set<int64_t> _opened_tablets;
 
-    std::unordered_map<TabletID, std::vector<int64_t>> _tablet_success_map;
-    std::unordered_map<TabletID, std::vector<int64_t>> _tablet_failure_map;
+    std::unordered_map<int64_t, std::vector<int64_t>> _tablet_success_map;
+    std::unordered_map<int64_t, std::vector<int64_t>> _tablet_failure_map;
     bthread::Mutex _tablet_success_map_mutex;
     bthread::Mutex _tablet_failure_map_mutex;
 

@@ -20,12 +20,14 @@
 #include <brpc/stream.h>
 #include <gen_cpp/internal_service.pb.h>
 
+#include <queue>
+
 #include "io/fs/file_writer.h"
-#include "vec/common/allocator.h"
 
 namespace doris {
 
 struct RowsetId;
+struct SegmentStatistics;
 
 namespace io {
 class StreamSinkFileWriter : public FileWriter {
@@ -33,19 +35,21 @@ public:
     StreamSinkFileWriter(brpc::StreamId stream);
     ~StreamSinkFileWriter() override;
 
-    static void deleter(void* data) { Allocator<false, false, false>::free_no_munmap(data); }
+    static void deleter(void* data) { ::free(data); }
 
     static Status send_with_retry(brpc::StreamId stream, butil::IOBuf buf);
 
-    void init(PUniqueId load_id, int64_t index_id, int64_t tablet_id,
-              int32_t segment_id, int32_t schema_hash);
+    void init(PUniqueId load_id, int64_t partition_id, int64_t index_id, int64_t tablet_id,
+              int32_t segment_id);
 
-    Status appendv(const OwnedSlice* data, size_t data_cnt) override;
+    Status appendv(OwnedSlice* data, size_t data_cnt) override;
 
     virtual Status appendv(const Slice* data, size_t data_cnt) override {
         CHECK(false);
         return Status::OK();
     }
+
+    Status finalize(SegmentStatistics* stat);
 
     Status finalize() override;
 
@@ -57,10 +61,17 @@ public:
 
 private:
     Status _stream_sender(butil::IOBuf buf) const { return send_with_retry(_stream, buf); }
+    Status _flush_pending_slices(bool eos, SegmentStatistics* stat);
+
+private:
+    std::queue<OwnedSlice> _pending_slices;
+    size_t _max_pending_bytes = config::streamsink_filewriter_batchsize;
+    size_t _pending_bytes;
 
     brpc::StreamId _stream;
 
     PUniqueId _load_id;
+    int64_t _partition_id;
     int64_t _index_id;
     int64_t _tablet_id;
     int32_t _segment_id;

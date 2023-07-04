@@ -20,6 +20,7 @@
 #include <gen_cpp/internal_service.pb.h>
 
 #include "olap/olap_common.h"
+#include "olap/rowset/rowset_writer.h"
 
 namespace doris {
 namespace io {
@@ -28,68 +29,87 @@ StreamSinkFileWriter::StreamSinkFileWriter(brpc::StreamId stream_id) : _stream(s
 
 StreamSinkFileWriter::~StreamSinkFileWriter() {}
 
-void StreamSinkFileWriter::init(PUniqueId load_id, int64_t index_id, int64_t tablet_id,
-                                int32_t segment_id, int32_t schema_hash) {
-    LOG(INFO) << "init stream writer, load id(" << UniqueId(load_id).to_string() << "), index id("
-              << index_id << "), tablet_id(" << tablet_id << "), segment_id("
-              << segment_id << "), schema_hash(" << schema_hash << ")";
+void StreamSinkFileWriter::init(PUniqueId load_id, int64_t partition_id, int64_t index_id,
+                                int64_t tablet_id, int32_t segment_id) {
+    LOG(INFO) << "init stream writer, load id(" << UniqueId(load_id).to_string()
+              << "), partition id(" << partition_id << "), index id(" << index_id << "), tablet_id("
+              << tablet_id << "), segment_id(" << segment_id << ")";
     _load_id = load_id;
+    _partition_id = partition_id;
     _index_id = index_id;
     _tablet_id = tablet_id;
     _segment_id = segment_id;
 }
 
-Status StreamSinkFileWriter::appendv(const OwnedSlice* data, size_t data_cnt) {
+Status StreamSinkFileWriter::appendv(OwnedSlice* data, size_t data_cnt) {
     size_t bytes_req = 0;
     for (int i = 0; i < data_cnt; i++) {
         bytes_req += data[i].slice().get_size();
+        _pending_slices.emplace(std::move(data[i]));
     }
+    _pending_bytes += bytes_req;
+
     LOG(INFO) << "writer appendv, load_id: " << UniqueId(_load_id).to_string()
               << ", index_id: " << _index_id << ", tablet_id: " << _tablet_id
               << ", segment_id: " << _segment_id << ", data_length: " << bytes_req;
-    butil::IOBuf buf;
+
+    if (_pending_bytes >= _max_pending_bytes) {
+        RETURN_IF_ERROR(_flush_pending_slices(false, nullptr));
+    }
+
+    LOG(INFO) << "current batched bytes: " << _pending_bytes;
+    return Status::OK();
+}
+
+Status StreamSinkFileWriter::_flush_pending_slices(bool eos, SegmentStatistics* stat) {
     PStreamHeader header;
     header.set_allocated_load_id(&_load_id);
+    header.set_partition_id(_partition_id);
     header.set_index_id(_index_id);
     header.set_tablet_id(_tablet_id);
     header.set_segment_id(_segment_id);
-    header.set_opcode(header.APPEND_DATA);
-    size_t header_len = header.ByteSizeLong();
-
-    buf.append(reinterpret_cast<uint8_t*>(&header_len), sizeof(header_len));
-    buf.append(header.SerializeAsString());
-    for (int i = 0; i < data_cnt; i++) {
-        Slice slice = data[i].slice();
-        buf.append_user_data(const_cast<void*>(static_cast<const void*>(slice.get_data())),
-                             slice.get_size(), deleter);
-        (const_cast<OwnedSlice*>(&data[i]))->release();
+    header.set_segment_eos(eos);
+    header.set_opcode(doris::PStreamHeader::APPEND_DATA);
+    if (stat) {
+        DCHECK(eos);
+        stat->to_pb(header.mutable_segment_statistics());
     }
 
+    size_t header_len = header.ByteSizeLong();
+    LOG(INFO) << "OOXXOO header pb: " << header.DebugString();
+
+    butil::IOBuf buf;
+    buf.append(reinterpret_cast<uint8_t*>(&header_len), sizeof(header_len));
+    buf.append(header.SerializeAsString());
+
+    size_t bytes_req = 0;
+    while (!_pending_slices.empty()) {
+        OwnedSlice owend_slice = std::move(_pending_slices.front());
+        _pending_slices.pop();
+        Slice slice = owend_slice.slice();
+        bytes_req += slice.get_size();
+        buf.append_user_data(const_cast<void*>(static_cast<const void*>(slice.get_data())),
+                             slice.get_size(), deleter);
+        owend_slice.release();
+    }
+    _pending_bytes -= bytes_req;
     _bytes_appended += bytes_req;
+
+    LOG(INFO) << "writer flushing, load_id: " << UniqueId(_load_id).to_string()
+              << ", index_id: " << _index_id << ", tablet_id: " << _tablet_id
+              << ", segment_id: " << _segment_id << ", data_length: " << bytes_req;
+
     Status status = _stream_sender(buf);
     header.release_load_id();
     return status;
 }
 
-Status StreamSinkFileWriter::finalize() {
+Status StreamSinkFileWriter::finalize(SegmentStatistics* stat) {
     LOG(INFO) << "writer finalize, load_id: " << UniqueId(_load_id).to_string()
               << ", index_id: " << _index_id << ", tablet_id: " << _tablet_id
               << ", segment_id: " << _segment_id;
-    butil::IOBuf buf;
-    PStreamHeader header;
-    header.set_allocated_load_id(&_load_id);
-    header.set_index_id(_index_id);
-    header.set_tablet_id(_tablet_id);
-    header.set_segment_id(_segment_id);
-    size_t header_len = header.ByteSizeLong();
-
-    LOG(INFO) << "segment_size: " << _bytes_appended;
-
-    buf.append(reinterpret_cast<uint8_t*>(&header_len), sizeof(header_len));
-    buf.append(header.SerializeAsString());
-    Status status = _stream_sender(buf);
-    header.release_load_id();
-    return status;
+    // TODO(zhengyu): update get_inverted_index_file_size into stat
+    return _flush_pending_slices(true, stat);
 }
 
 Status StreamSinkFileWriter::send_with_retry(brpc::StreamId stream, butil::IOBuf buf) {
@@ -109,6 +129,10 @@ Status StreamSinkFileWriter::send_with_retry(brpc::StreamId stream, butil::IOBuf
             return Status::OK();
         }
     }
+}
+
+Status StreamSinkFileWriter::finalize() {
+    return Status::OK();
 }
 
 Status StreamSinkFileWriter::abort() {
