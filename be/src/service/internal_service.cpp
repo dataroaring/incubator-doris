@@ -1607,7 +1607,7 @@ Status PInternalServiceImpl::_multi_get(const PMultiGetRequest& request,
         SegmentCacheHandle segment_cache;
         RETURN_IF_ERROR(scope_timer_run(
                 [&]() {
-                    return SegmentLoader::instance()->load_segments(rowset, &segment_cache, true);
+                    return SegmentLoader::instance()->load_segments(rowset, &segment_cache, false);
                 },
                 &acquire_segments_ms));
         // find segment

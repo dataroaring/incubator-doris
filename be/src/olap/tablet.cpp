@@ -2649,7 +2649,7 @@ Status Tablet::fetch_value_through_row_column(RowsetSharedPtr input_rowset, uint
 
     const TabletSchemaSPtr tablet_schema = rowset->tablet_schema();
     SegmentCacheHandle segment_cache;
-    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, true));
+    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, false));
     // find segment
     auto it = std::find_if(
             segment_cache.get_segments().begin(), segment_cache.get_segments().end(),
@@ -2706,7 +2706,7 @@ Status Tablet::fetch_value_by_rowids(RowsetSharedPtr input_rowset, uint32_t segi
     CHECK(rowset);
 
     SegmentCacheHandle segment_cache;
-    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, true));
+    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, false));
     // find segment
     auto it = std::find_if(
             segment_cache.get_segments().begin(), segment_cache.get_segments().end(),
@@ -2750,7 +2750,7 @@ Status Tablet::lookup_row_data(const Slice& encoded_key, const RowLocation& row_
 
     const TabletSchemaSPtr tablet_schema = rowset->tablet_schema();
     SegmentCacheHandle segment_cache;
-    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, true));
+    RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(rowset, &segment_cache, false));
     // find segment
     auto it = std::find_if(segment_cache.get_segments().begin(), segment_cache.get_segments().end(),
                            [&row_location](const segment_v2::SegmentSharedPtr& seg) {
@@ -2828,7 +2828,7 @@ Status Tablet::lookup_row_key(const Slice& encoded_key, bool with_seq_col,
         if (UNLIKELY(segment_caches[i] == nullptr)) {
             segment_caches[i] = std::make_unique<SegmentCacheHandle>();
             RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(
-                    std::static_pointer_cast<BetaRowset>(rs), segment_caches[i].get(), true));
+                    std::static_pointer_cast<BetaRowset>(rs), segment_caches[i].get(), false));
         }
         auto& segments = segment_caches[i]->get_segments();
         DCHECK_EQ(segments.size(), num_segments);

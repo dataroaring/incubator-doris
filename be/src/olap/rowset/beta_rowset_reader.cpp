@@ -211,6 +211,7 @@ Status BetaRowsetReader::get_segment_iterators(RowsetReaderContext* read_context
 
     // load segments
     bool should_use_cache = use_cache || read_context->reader_type == ReaderType::READER_QUERY;
+    should_use_cache = false;
     RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(_rowset, &_segment_cache_handle,
                                                              should_use_cache));
 

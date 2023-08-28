@@ -57,6 +57,7 @@ class Segment;
 class InvertedIndexIterator;
 
 using SegmentSharedPtr = std::shared_ptr<Segment>;
+static int64_t _open_flag = false;
 // A Segment is used to represent a segment in memory format. When segment is
 // generated, it won't be modified, so this struct aimed to help read operation.
 // It will prepare all ColumnReader to create ColumnIterator as needed.
@@ -166,6 +167,7 @@ private:
     std::unique_ptr<PrimaryKeyIndexReader> _pk_index_reader;
     // Segment may be destructed after StorageEngine, in order to exit gracefully.
     std::shared_ptr<MemTracker> _segment_meta_mem_tracker;
+    std::mutex _open_lock;
 };
 
 } // namespace segment_v2

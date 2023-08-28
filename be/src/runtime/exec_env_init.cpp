@@ -322,7 +322,7 @@ Status ExecEnv::_init_mem_env() {
     }
     LOG(INFO) << "segment_cache_capacity <= fd_number * 2 / 5, fd_number: " << fd_number
               << " segment_cache_capacity: " << segment_cache_capacity;
-    SegmentLoader::create_global_instance(segment_cache_capacity);
+    SegmentLoader::create_global_instance(1);
 
     SchemaCache::create_global_instance(config::schema_cache_capacity);
 

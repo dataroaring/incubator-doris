@@ -97,6 +97,7 @@ Segment::~Segment() {
 
 Status Segment::_open() {
     SegmentFooterPB footer;
+    SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker1());
     RETURN_IF_ERROR(_parse_footer(&footer));
     RETURN_IF_ERROR(_create_column_readers(footer));
     _pk_index_meta.reset(footer.has_primary_key_index_meta() ?
@@ -163,6 +164,7 @@ Status Segment::new_iterator(SchemaSPtr schema, const StorageReadOptions& read_o
 Status Segment::_parse_footer(SegmentFooterPB* footer) {
     // Footer := SegmentFooterPB, FooterPBSize(4), FooterPBChecksum(4), MagicNumber(4)
     auto file_size = _file_reader->size();
+    SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker2());
     if (file_size < 12) {
         return Status::Corruption("Bad segment file {}: file size {} < 12",
                                   _file_reader->path().native(), file_size);
@@ -177,9 +179,12 @@ Status Segment::_parse_footer(SegmentFooterPB* footer) {
     DCHECK_EQ(bytes_read, 12);
 
     // validate magic number
-    if (memcmp(fixed_buf + 8, k_segment_magic, k_segment_magic_length) != 0) {
-        return Status::Corruption("Bad segment file {}: magic number not match",
-                                  _file_reader->path().native());
+    {
+        // SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker8());
+        if (memcmp(fixed_buf + 8, k_segment_magic, k_segment_magic_length) != 0) {
+            return Status::Corruption("Bad segment file {}: magic number not match",
+                                      _file_reader->path().native());
+        }
     }
 
     // read footer PB
@@ -192,10 +197,13 @@ Status Segment::_parse_footer(SegmentFooterPB* footer) {
     _segment_meta_mem_tracker->consume(footer_length);
 
     std::string footer_buf;
-    footer_buf.resize(footer_length);
-    RETURN_IF_ERROR(_file_reader->read_at(file_size - 12 - footer_length, footer_buf, &bytes_read,
-                                          &io_ctx));
-    DCHECK_EQ(bytes_read, footer_length);
+    {
+        // SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker11());
+        footer_buf.resize(footer_length);
+        RETURN_IF_ERROR(_file_reader->read_at(file_size - 12 - footer_length, footer_buf,
+                                              &bytes_read, &io_ctx));
+        DCHECK_EQ(bytes_read, footer_length);
+    }
 
     // validate footer PB's checksum
     uint32_t expect_checksum = decode_fixed32_le(fixed_buf + 4);
@@ -206,10 +214,13 @@ Status Segment::_parse_footer(SegmentFooterPB* footer) {
                 _file_reader->path().native(), actual_checksum, expect_checksum);
     }
 
-    // deserialize footer PB
-    if (!footer->ParseFromString(footer_buf)) {
-        return Status::Corruption("Bad segment file {}: failed to parse SegmentFooterPB",
-                                  _file_reader->path().native());
+    {
+        SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker10());
+        // deserialize footer PB
+        if (!footer->ParseFromString(footer_buf)) {
+            return Status::Corruption("Bad segment file {}: failed to parse SegmentFooterPB",
+                                      _file_reader->path().native());
+        }
     }
     return Status::OK();
 }
@@ -274,6 +285,7 @@ Status Segment::_create_column_readers(const SegmentFooterPB& footer) {
     }
 
     for (uint32_t ordinal = 0; ordinal < _tablet_schema->num_columns(); ++ordinal) {
+        SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker5());
         auto& column = _tablet_schema->column(ordinal);
         auto iter = column_id_to_footer_ordinal.find(column.unique_id());
         if (iter == column_id_to_footer_ordinal.end()) {
@@ -283,8 +295,11 @@ Status Segment::_create_column_readers(const SegmentFooterPB& footer) {
         ColumnReaderOptions opts;
         opts.kept_in_memory = _tablet_schema->is_in_memory();
         std::unique_ptr<ColumnReader> reader;
-        RETURN_IF_ERROR(ColumnReader::create(opts, footer.columns(iter->second),
-                                             footer.num_rows(), _file_reader, &reader));
+        {
+            SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker6());
+            RETURN_IF_ERROR(ColumnReader::create(opts, footer.columns(iter->second),
+                                                 footer.num_rows(), _file_reader, &reader));
+        }
         _column_readers.emplace(column.unique_id(), std::move(reader));
     }
     return Status::OK();
