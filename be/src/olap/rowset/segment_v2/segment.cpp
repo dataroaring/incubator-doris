@@ -74,6 +74,17 @@ Status Segment::open(io::FileSystemSPtr fs, const std::string& path, uint32_t se
     io::FileReaderSPtr file_reader;
     io::FileDescription fd;
     fd.path = path;
+    LOG(INFO) << "segment_path:" << path;
+#ifndef BE_TEST
+    RETURN_IF_ERROR(fs->open_file(fd, reader_options, &file_reader));
+#else
+    // be ut use local file reader instead of remote file reader while use remote cache
+    if (!config::file_cache_type.empty()) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->open_file(fd, reader_options, &file_reader));
+    } else {
+        RETURN_IF_ERROR(fs->open_file(fd, reader_options, &file_reader));
+    }
+#endif
     RETURN_IF_ERROR(fs->open_file(fd, reader_options, &file_reader));
     std::shared_ptr<Segment> segment(new Segment(segment_id, rowset_id, tablet_schema));
     segment->_file_reader = std::move(file_reader);
@@ -87,17 +98,24 @@ Segment::Segment(uint32_t segment_id, RowsetId rowset_id, TabletSchemaSPtr table
           _meta_mem_usage(0),
           _rowset_id(rowset_id),
           _tablet_schema(tablet_schema),
-          _segment_meta_mem_tracker(StorageEngine::instance()->segment_meta_mem_tracker()) {}
+          _segment_meta_mem_tracker(StorageEngine::instance()->segment_meta_mem_tracker()) {
+}
 
 Segment::~Segment() {
+    SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker1());
+    SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker6());
+    {
+       _column_readers.clear();
+    }
+    LOG(INFO) << "Segment::~Segment";
 #ifndef BE_TEST
     _segment_meta_mem_tracker->release(_meta_mem_usage);
 #endif
 }
 
 Status Segment::_open() {
-    SegmentFooterPB footer;
     SCOPED_CONSUME_MEM_TRACKER(StorageEngine::instance()->segment_meta_mem_tracker1());
+    SegmentFooterPB footer;
     RETURN_IF_ERROR(_parse_footer(&footer));
     RETURN_IF_ERROR(_create_column_readers(footer));
     _pk_index_meta.reset(footer.has_primary_key_index_meta() ?
