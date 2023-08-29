@@ -484,7 +484,12 @@ Status VCollectIterator::Level0Iterator::init_for_union(bool is_first_child, boo
         _block = std::make_shared<Block>(_schema.create_block(
                 _reader->_return_columns, _reader->_tablet_columns_convert_to_null_set));
     }
-    auto st = _refresh_current_row();
+    //auto st = _refresh_current_row();
+    Status st;
+    if(is_first_child){
+        st = _refresh_current_row();
+    }
+
     if (_get_data_by_ref && _block_view.size()) {
         if (is_first_child) {
             _ref = _block_view[0];
