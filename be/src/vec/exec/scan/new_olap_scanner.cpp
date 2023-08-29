@@ -518,6 +518,8 @@ Status NewOlapScanner::_get_block_impl(RuntimeState* state, Block* block, bool* 
     if (block->rows() > 0) {
         *eof = false;
     }
+    auto tablet_id = _scan_range.tablet_id;
+    LOG(INFO) << "tablet_id" << tablet_id;
     _update_realtime_counters();
     return Status::OK();
 }
@@ -535,7 +537,8 @@ Status NewOlapScanner::close(RuntimeState* state) {
     // so that it will core
     _tablet_reader_params.rs_splits.clear();
     _tablet_reader.reset();
-
+    auto tablet_id = _scan_range.tablet_id;
+    LOG(INFO) << "close_tablet_id" << tablet_id;
     RETURN_IF_ERROR(VScanner::close(state));
     return Status::OK();
 }
