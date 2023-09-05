@@ -107,7 +107,7 @@ Segment::~Segment() {
     {
        _column_readers.clear();
     }
-    LOG(INFO) << "Segment::~Segment";
+    LOG(INFO) << "Segment::~Segment " << _file_reader->path();
 #ifndef BE_TEST
     _segment_meta_mem_tracker->release(_meta_mem_usage);
 #endif
@@ -211,8 +211,6 @@ Status Segment::_parse_footer(SegmentFooterPB* footer) {
         return Status::Corruption("Bad segment file {}: file size {} < {}",
                                   _file_reader->path().native(), file_size, 12 + footer_length);
     }
-    _meta_mem_usage += footer_length;
-    _segment_meta_mem_tracker->consume(footer_length);
 
     std::string footer_buf;
     {
@@ -289,6 +287,7 @@ Status Segment::load_index() {
             _meta_mem_usage += body.get_size();
             _segment_meta_mem_tracker->consume(body.get_size());
             _sk_index_decoder.reset(new ShortKeyIndexDecoder);
+            LOG(INFO) << "sk index size " << body.get_size();
             return _sk_index_decoder->parse(body, footer.short_key_page_footer());
         }
     });

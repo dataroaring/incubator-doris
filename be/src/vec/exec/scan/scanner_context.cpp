@@ -172,6 +172,8 @@ void ScannerContext::return_free_block(std::unique_ptr<vectorized::Block> block)
     _free_blocks_memory_usage->add(block->allocated_bytes());
     _free_blocks.enqueue(std::move(block));
     ++_free_blocks_capacity;
+    LOG(INFO) << "free blocks " << _free_blocks_capacity << " bytes " << block->allocated_bytes()
+              << " this " << (void*)this << "newly create free blocks " << _newly_create_free_blocks_num->value();
 }
 
 void ScannerContext::append_blocks_to_queue(std::vector<vectorized::BlockUPtr>& blocks) {

@@ -46,7 +46,7 @@ public:
     BetaRowsetReader(BetaRowsetSharedPtr rowset);
 
     ~BetaRowsetReader() override { 
-        LOG(INFO) << "BetaRowsetReader~BetaRowsetReader";
+        LOG(INFO) << "BetaRowsetReader~BetaRowsetReader " << (void*)this << " " << _rowset->segment_file_path(0);
         _rowset->release(); }
 
     Status init(RowsetReaderContext* read_context, const RowSetSplits& rs_splits) override;

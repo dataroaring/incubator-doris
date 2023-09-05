@@ -52,7 +52,7 @@ using namespace ErrorCode;
 
 BetaRowsetReader::BetaRowsetReader(BetaRowsetSharedPtr rowset)
         : _read_context(nullptr), _rowset(std::move(rowset)), _stats(&_owned_stats) {
-    LOG(INFO) << "BetaRowsetReader::BetaRowsetReader";
+    LOG(INFO) << "BetaRowsetReader::BetaRowsetReader " << (void*)this << " " << _rowset->segment_file_path(0);
     _rowset->acquire();
 }
 
@@ -256,6 +256,8 @@ Status BetaRowsetReader::_init_iterator_once() {
 }
 
 Status BetaRowsetReader::_init_iterator() {
+    LOG(INFO) << " BetaRowsetReader::init_iterator " << _rowset->segment_file_path(0);
+
     std::vector<RowwiseIteratorUPtr> iterators;
     RETURN_IF_ERROR(get_segment_iterators(_read_context, &iterators));
 
@@ -303,6 +305,7 @@ Status BetaRowsetReader::next_block(vectorized::Block* block) {
             if (!s.is<END_OF_FILE>()) {
                 LOG(WARNING) << "failed to read next block: " << s.to_string();
             }
+            LOG(INFO) << s << " this " << _rowset->segment_file_path(0);
             return s;
         }
     } while (block->empty());
