@@ -52,7 +52,6 @@ using namespace ErrorCode;
 
 BetaRowsetReader::BetaRowsetReader(BetaRowsetSharedPtr rowset)
         : _read_context(nullptr), _rowset(std::move(rowset)), _stats(&_owned_stats) {
-    LOG(INFO) << "BetaRowsetReader::BetaRowsetReader " << (void*)this << " " << _rowset->segment_file_path(0);
     _rowset->acquire();
 }
 
@@ -212,7 +211,6 @@ Status BetaRowsetReader::get_segment_iterators(RowsetReaderContext* read_context
 
     // load segments
     bool should_use_cache = use_cache || _read_context->reader_type == ReaderType::READER_QUERY;
-    should_use_cache = false;
     RETURN_IF_ERROR(SegmentLoader::instance()->load_segments(_rowset, &_segment_cache_handle,
                                                              should_use_cache));
 
@@ -242,7 +240,6 @@ Status BetaRowsetReader::get_segment_iterators(RowsetReaderContext* read_context
 }
 
 Status BetaRowsetReader::init(RowsetReaderContext* read_context, const RowSetSplits& rs_splits) {
-    LOG(INFO) << "BetaRowsetReader::init";
     _read_context = read_context;
     _read_context->rowset_id = _rowset->rowset_id();
     _segment_offsets = rs_splits.segment_offsets;
@@ -256,13 +253,11 @@ Status BetaRowsetReader::_init_iterator_once() {
 }
 
 Status BetaRowsetReader::_init_iterator() {
-    LOG(INFO) << " BetaRowsetReader::init_iterator " << _rowset->segment_file_path(0);
-
     std::vector<RowwiseIteratorUPtr> iterators;
     RETURN_IF_ERROR(get_segment_iterators(_read_context, &iterators));
 
     // merge or union segment iterator
-    if (_read_context->need_ordered_result && _rowset->rowset_meta()->is_segments_overlapping()) {
+    if (_is_merge_iterator()) {
         auto sequence_loc = -1;
         if (_read_context->sequence_id_idx != -1) {
             for (size_t loc = 0; loc < _read_context->return_columns->size(); loc++) {
@@ -305,7 +300,6 @@ Status BetaRowsetReader::next_block(vectorized::Block* block) {
             if (!s.is<END_OF_FILE>()) {
                 LOG(WARNING) << "failed to read next block: " << s.to_string();
             }
-            LOG(INFO) << s << " this " << _rowset->segment_file_path(0);
             return s;
         }
     } while (block->empty());

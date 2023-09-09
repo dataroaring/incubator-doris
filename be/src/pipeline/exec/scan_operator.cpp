@@ -54,7 +54,7 @@ bool ScanOperator::can_read() {
             return true;
         } else {
             if (_node->_scanner_ctx->get_num_running_scanners() == 0 &&
-                _node->_scanner_ctx->has_enough_space_in_blocks_queue()) {
+                _node->_scanner_ctx->should_be_schedule()) {
                 _node->_scanner_ctx->reschedule_scanner_ctx();
             }
             return _node->ready_to_read(); // there are some blocks to process
@@ -1258,7 +1258,7 @@ bool ScanOperatorX<LocalStateType>::can_read(RuntimeState* state) {
             return true;
         } else {
             if (local_state._scanner_ctx->get_num_running_scanners() == 0 &&
-                local_state._scanner_ctx->has_enough_space_in_blocks_queue()) {
+                local_state._scanner_ctx->should_be_schedule()) {
                 local_state._scanner_ctx->reschedule_scanner_ctx();
             }
             return local_state.ready_to_read(); // there are some blocks to process

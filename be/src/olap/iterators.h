@@ -144,8 +144,6 @@ public:
         return Status::NotSupported("to be implemented");
     }
 
-    virtual bool support_return_data_by_ref() { return false; }
-
     virtual Status current_block_row_locations(std::vector<RowLocation>* block_row_locations) {
         return Status::NotSupported("to be implemented");
     }

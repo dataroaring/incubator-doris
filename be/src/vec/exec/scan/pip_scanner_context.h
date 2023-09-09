@@ -160,8 +160,9 @@ public:
         _free_blocks_memory_usage->add(free_blocks_memory_usage);
     }
 
-    bool has_enough_space_in_blocks_queue() const override {
-        return _current_used_bytes < _max_bytes_in_queue / 2 * _num_parallel_instances;
+    bool should_be_schedule() const override {
+        return (_current_used_bytes < _max_bytes_in_queue / 2 * _num_parallel_instances) &&
+               (_serving_blocks_num < allowed_blocks_num());
     }
 
     void _dispose_coloate_blocks_not_in_queue() override {
@@ -210,8 +211,7 @@ private:
             if (row_add == max_add) {
                 _current_used_bytes += _colocate_blocks[loc]->allocated_bytes();
                 { _blocks_queues[loc].enqueue(std::move(_colocate_blocks[loc])); }
-                bool get_block_not_empty = true;
-                _colocate_blocks[loc] = get_free_block(&get_block_not_empty, get_block_not_empty);
+                _colocate_blocks[loc] = get_free_block();
                 _colocate_mutable_blocks[loc]->set_muatable_columns(
                         _colocate_blocks[loc]->mutate_columns());
             }

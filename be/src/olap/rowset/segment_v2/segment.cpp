@@ -74,7 +74,6 @@ Status Segment::open(io::FileSystemSPtr fs, const std::string& path, uint32_t se
     io::FileReaderSPtr file_reader;
     io::FileDescription fd;
     fd.path = path;
-    LOG(INFO) << "segment_path:" << path;
 #ifndef BE_TEST
     RETURN_IF_ERROR(fs->open_file(fd, reader_options, &file_reader));
 #else
@@ -107,7 +106,6 @@ Segment::~Segment() {
     {
        _column_readers.clear();
     }
-    LOG(INFO) << "Segment::~Segment " << _file_reader->path();
 #ifndef BE_TEST
     _segment_meta_mem_tracker->release(_meta_mem_usage);
 #endif
@@ -287,7 +285,6 @@ Status Segment::load_index() {
             _meta_mem_usage += body.get_size();
             _segment_meta_mem_tracker->consume(body.get_size());
             _sk_index_decoder.reset(new ShortKeyIndexDecoder);
-            LOG(INFO) << "sk index size " << body.get_size();
             return _sk_index_decoder->parse(body, footer.short_key_page_footer());
         }
     });

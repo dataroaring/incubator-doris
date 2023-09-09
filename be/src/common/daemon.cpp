@@ -245,7 +245,6 @@ void Daemon::memory_gc_thread() {
             memory_minor_gc_sleep_time_ms = memory_gc_sleep_time_ms;
             LOG(INFO) << fmt::format("Start Full GC, {}.",
                                      MemTrackerLimiter::process_limit_exceeded_errmsg_str());
-            exit(1);
             doris::MemTrackerLimiter::print_log_process_usage();
             if (doris::MemInfo::process_full_gc()) {
                 // If there is not enough memory to be gc, the process memory usage will not be printed in the next continuous gc.

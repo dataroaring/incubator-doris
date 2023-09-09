@@ -120,6 +120,9 @@ Status ScannerContext::init() {
             limit == -1 ? _batch_size : std::min(static_cast<int64_t>(_batch_size), limit);
     _block_per_scanner = (doris_scanner_row_num + (real_block_size - 1)) / real_block_size;
     _free_blocks_capacity = _max_thread_num * _block_per_scanner;
+    auto block = get_free_block();
+    _estimated_block_bytes = block->allocated_bytes();
+    return_free_block(std::move(block));
 
 #ifndef BE_TEST
     // 3. get thread token
@@ -151,29 +154,33 @@ std::string ScannerContext::parent_name() {
     return _parent ? _parent->get_name() : _local_state->get_name();
 }
 
-vectorized::BlockUPtr ScannerContext::get_free_block(bool* has_free_block,
-                                                     bool get_block_not_empty) {
+vectorized::BlockUPtr ScannerContext::get_free_block() {
     vectorized::BlockUPtr block;
     if (_free_blocks.try_dequeue(block)) {
-        if (!get_block_not_empty || block->mem_reuse()) {
-            _free_blocks_capacity--;
-            _free_blocks_memory_usage->add(-block->allocated_bytes());
-            return block;
-        }
+        DCHECK(block->mem_reuse());
+        _free_blocks_memory_usage->add(-block->allocated_bytes());
+        _serving_blocks_num++;
+        return block;
     }
 
+    block = vectorized::Block::create_unique(_output_tuple_desc->slots(), _batch_size,
+                                             true /*ignore invalid slots*/);
     COUNTER_UPDATE(_newly_create_free_blocks_num, 1);
-    return vectorized::Block::create_unique(_output_tuple_desc->slots(), _batch_size,
-                                            true /*ignore invalid slots*/);
+
+    _serving_blocks_num++;
+    return block;
 }
 
 void ScannerContext::return_free_block(std::unique_ptr<vectorized::Block> block) {
-    block->clear_column_data();
-    _free_blocks_memory_usage->add(block->allocated_bytes());
-    _free_blocks.enqueue(std::move(block));
-    ++_free_blocks_capacity;
-    LOG(INFO) << "free blocks " << _free_blocks_capacity << " bytes " << block->allocated_bytes()
-              << " this " << (void*)this << "newly create free blocks " << _newly_create_free_blocks_num->value();
+    _serving_blocks_num--;
+    if (block->mem_reuse()) {
+        // Only put blocks with schema to free blocks, because colocate blocks
+        // need schema.
+        _estimated_block_bytes = block->allocated_bytes();
+        block->clear_column_data();
+        _free_blocks_memory_usage->add(block->allocated_bytes());
+        _free_blocks.enqueue(std::move(block));
+    }
 }
 
 void ScannerContext::append_blocks_to_queue(std::vector<vectorized::BlockUPtr>& blocks) {
@@ -196,18 +203,13 @@ bool ScannerContext::empty_in_queue(int id) {
 Status ScannerContext::get_block_from_queue(RuntimeState* state, vectorized::BlockUPtr* block,
                                             bool* eos, int id, bool wait) {
     std::unique_lock l(_transfer_lock);
-    // debug case failure, to be removed
-    if (state->enable_profile()) {
-        LOG(WARNING) << "debug case failure " << print_id(state->query_id()) << " "
-                     << _parent->get_name() << ": ScannerContext::get_block_from_queue";
-    }
     // Normally, the scanner scheduler will schedule ctx.
     // But when the amount of data in the blocks queue exceeds the upper limit,
     // the scheduler will stop scheduling.
     // (if the scheduler continues to schedule, it will cause a lot of busy running).
     // At this point, consumers are required to trigger new scheduling to ensure that
     // data can be continuously fetched.
-    if (has_enough_space_in_blocks_queue() && _num_running_scanners == 0) {
+    if (should_be_schedule() && _num_running_scanners == 0) {
         auto state = _scanner_scheduler->submit(this);
         if (state.ok()) {
             _num_scheduling_ctx++;
@@ -215,6 +217,7 @@ Status ScannerContext::get_block_from_queue(RuntimeState* state, vectorized::Blo
             set_status_on_error(state, false);
         }
     }
+
     // Wait for block from queue
     if (wait) {
         // scanner batch wait time
@@ -238,6 +241,7 @@ Status ScannerContext::get_block_from_queue(RuntimeState* state, vectorized::Blo
         _blocks_queue.pop_front();
         auto block_bytes = (*block)->allocated_bytes();
         _cur_bytes_in_queue -= block_bytes;
+
         _queued_blocks_memory_usage->add(-block_bytes);
         return Status::OK();
     } else {
@@ -374,7 +378,13 @@ void ScannerContext::push_back_scanner_and_reschedule(VScannerSPtr scanner) {
         _scanners.push_front(scanner);
     }
     std::lock_guard l(_transfer_lock);
-    if (has_enough_space_in_blocks_queue()) {
+
+    // In pipeline engine, doris will close scanners when `no_schedule`.
+    // We have to decrease _num_running_scanners before schedule, otherwise
+    // schedule does not woring due to _num_running_scanners.
+    _num_running_scanners--;
+
+    if (should_be_schedule()) {
         auto state = _scanner_scheduler->submit(this);
         if (state.ok()) {
             _num_scheduling_ctx++;
@@ -394,8 +404,6 @@ void ScannerContext::push_back_scanner_and_reschedule(VScannerSPtr scanner) {
         _is_finished = true;
         _blocks_queue_added_cv.notify_one();
     }
-    // In pipeline engine, doris will close scanners when `no_schedule`.
-    _num_running_scanners--;
     _ctx_finish_cv.notify_one();
 }
 
@@ -405,7 +413,7 @@ void ScannerContext::get_next_batch_of_scanners(std::list<VScannerSPtr>* current
     {
         // If there are enough space in blocks queue,
         // the scanner number depends on the _free_blocks numbers
-        thread_slot_num = cal_thread_slot_num_by_free_block_num();
+        thread_slot_num = get_available_thread_slot_num();
     }
 
     // 2. get #thread_slot_num scanners from ctx->scanners
