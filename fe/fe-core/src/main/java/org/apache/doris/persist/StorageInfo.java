@@ -24,7 +24,7 @@ import java.util.Objects;
  * StorageInfo is easier to serialize to a Json String than class Storage
  */
 public class StorageInfo {
-    private int clusterID;
+    private long clusterID;
     private long imageSeq;
     private long editsSeq;
 
@@ -32,17 +32,17 @@ public class StorageInfo {
         this(-1, 0, 0);
     }
 
-    public StorageInfo(int clusterID, long imageSeq, long editsSeq) {
+    public StorageInfo(long clusterID, long imageSeq, long editsSeq) {
         this.clusterID = clusterID;
         this.editsSeq = editsSeq;
         this.imageSeq = imageSeq;
     }
 
-    public int getClusterID() {
+    public long getClusterID() {
         return clusterID;
     }
 
-    public void setClusterID(int clusterID) {
+    public void setClusterID(long clusterID) {
         this.clusterID = clusterID;
     }
 

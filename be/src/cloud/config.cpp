@@ -21,7 +21,7 @@
 namespace doris::config {
 
 DEFINE_String(deploy_mode, "");
-DEFINE_mString(cloud_instance_id, "");
+DEFINE_mInt64(cluster_id, "-1");
 DEFINE_mString(cloud_unique_id, "");
 DEFINE_mString(meta_service_endpoint, "");
 DEFINE_Bool(meta_service_use_load_balancer, "false");
@@ -68,7 +68,7 @@ DEFINE_mBool(enable_new_tablet_do_compaction, "false");
 DEFINE_Bool(enable_cloud_txn_lazy_commit, "false");
 
 void set_cloud_unique_id(std::string instance_id) {
-    if (cloud_unique_id.empty() && !instance_id.empty()) {
+    if (cloud_unique_id.empty() && !instance_id.empty() && instance_id != "-1") {
         static_cast<void>(set_config("cloud_unique_id", "1:" + instance_id + ":compute", true));
     }
 }

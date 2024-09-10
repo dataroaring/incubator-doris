@@ -451,7 +451,7 @@ public class Config extends ConfigBase {
             "集群 ID，用于内部认证。通常在集群第一次启动时，会随机生成一个 cluster id. 用户也可以手动指定。",
             "Cluster id used for internal authentication. Usually a random integer generated when master FE "
                     + "start at first time. You can also specify one."})
-    public static int cluster_id = -1;
+    public static long cluster_id = -1;
 
     @ConfField(description = {"集群 token，用于内部认证。",
             "Cluster token used for internal authentication."})
@@ -2803,16 +2803,12 @@ public class Config extends ConfigBase {
     public static String deploy_mode = "";
 
     // compatibily with elder version.
-    // cloud_unique_id is introduced before cloud_instance_id, so it has higher priority.
+    // cloud_unique_id has higher priority than cluster_id.
     @ConfField
     public static String cloud_unique_id = "";
 
-    // If cloud_unique_id is empty, cloud_instance_id works, otherwise cloud_unique_id works.
-    @ConfField
-    public static String cloud_instance_id = "";
-
     public static boolean isCloudMode() {
-        return deploy_mode.equals("disaggregated") || !cloud_unique_id.isEmpty() || !cloud_instance_id.isEmpty();
+        return deploy_mode.equals("disaggregated") || !cloud_unique_id.isEmpty();
     }
 
     public static boolean isNotCloudMode() {

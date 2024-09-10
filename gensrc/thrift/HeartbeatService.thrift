@@ -40,7 +40,8 @@ struct TMasterInfo {
     8: optional i64 backend_id
     9: optional list<TFrontendInfo> frontend_infos
     10: optional string meta_service_endpoint;
-    11: optional string cloud_instance_id;
+    // cluster_id64 is 64 bits.
+    11: optional i64 cluster_id64;
 }
 
 struct TBackendInfo {

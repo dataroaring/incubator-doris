@@ -311,7 +311,7 @@ public class CloudSystemInfoService extends SystemInfoService {
 
     private void alterBackendCluster(List<HostInfo> hostInfos, String clusterName,
                                      Cloud.AlterClusterRequest.Operation operation) throws DdlException {
-        if (Strings.isNullOrEmpty(Config.cloud_instance_id)) {
+        if (Strings.isNullOrEmpty(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())) {
             throw new DdlException("unable to alter backends due to empty cloud_instance_id");
         }
         // Issue rpc to meta to alter node, then fe master would add this node to its frontends
@@ -331,7 +331,7 @@ public class CloudSystemInfoService extends SystemInfoService {
         }
 
         Cloud.AlterClusterRequest request = Cloud.AlterClusterRequest.newBuilder()
-                .setInstanceId(Config.cloud_instance_id)
+                .setInstanceId(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())
                 .setOp(operation)
                 .setCluster(clusterPB)
                 .build();
@@ -740,7 +740,7 @@ public class CloudSystemInfoService extends SystemInfoService {
     // FrontendCluster = SqlServerCluster
     private void alterFrontendCluster(FrontendNodeType role, String host, int editLogPort,
             Cloud.AlterClusterRequest.Operation op) throws DdlException {
-        if (Strings.isNullOrEmpty(Config.cloud_instance_id)) {
+        if (Strings.isNullOrEmpty(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())) {
             throw new DdlException("unable to alter frontend due to empty cloud_instance_id");
         }
 
@@ -762,7 +762,7 @@ public class CloudSystemInfoService extends SystemInfoService {
                 .build();
 
         Cloud.AlterClusterRequest request = Cloud.AlterClusterRequest.newBuilder()
-                .setInstanceId(Config.cloud_instance_id)
+                .setInstanceId(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())
                 .setOp(op)
                 .setCluster(clusterPB)
                 .build();
@@ -793,7 +793,7 @@ public class CloudSystemInfoService extends SystemInfoService {
     }
 
     private void tryCreateCluster(String clusterName, String clusterId) throws UserException {
-        if (Strings.isNullOrEmpty(Config.cloud_instance_id)) {
+        if (Strings.isNullOrEmpty(((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId())) {
             throw new DdlException("unable to create cluster due to empty cloud_instance_id");
         }
 

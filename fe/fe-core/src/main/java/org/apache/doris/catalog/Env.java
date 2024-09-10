@@ -432,7 +432,7 @@ public class Env {
     private MetaIdGenerator idGenerator = new MetaIdGenerator(NEXT_ID_INIT_VALUE);
 
     private EditLog editLog;
-    protected int clusterId;
+    protected long clusterId;
     protected String token;
     // For checkpoint and observer memory replayed marker
     private AtomicLong replayedJournalId;
@@ -1150,6 +1150,17 @@ public class Env {
         return !roleFile.exists() && !versionFile.exists();
     }
 
+    private void getClusterIdFromStorage(Storage storage) throws UserException {
+        clusterId = storage.getClusterID();
+        if (Config.cluster_id != -1 && Config.cluster_id != this.clusterId) {
+            LOG.warn("Configured cluster_id {} does not match stored cluster_id {}. "
+                     + "This may indicate a configuration error.",
+                     Config.cluster_id, this.clusterId);
+            throw new UserException("Configured cluster_id does not match stored cluster_id. "
+                                    + "Please check your configuration.");
+        }
+    }
+
     protected void getClusterIdAndRole() throws IOException {
         File roleFile = new File(this.imageDir, Storage.ROLE_FILE);
         File versionFile = new File(this.imageDir, Storage.VERSION_FILE);
@@ -1231,7 +1242,7 @@ public class Env {
                 frontends.put(nodeName, self);
                 LOG.info("add self frontend: {}", self);
             } else {
-                clusterId = storage.getClusterID();
+                getClusterIdFromStorage(storage);
                 if (storage.getToken() == null) {
                     token = Strings.isNullOrEmpty(Config.auth_token) ? Storage.newToken() : Config.auth_token;
                     LOG.info("refresh new token");
@@ -1286,7 +1297,7 @@ public class Env {
                 // NOTE: cluster_id will be init when Storage object is constructed,
                 //       so we new one.
                 storage = new Storage(this.imageDir);
-                clusterId = storage.getClusterID();
+                getClusterIdFromStorage(storage);
                 token = storage.getToken();
                 if (Strings.isNullOrEmpty(token)) {
                     token = Config.auth_token;
@@ -1294,7 +1305,7 @@ public class Env {
             } else {
                 // If the version file exist, read the cluster id and check the
                 // id with helper node to make sure they are identical
-                clusterId = storage.getClusterID();
+                getClusterIdFromStorage(storage);
                 token = storage.getToken();
                 try {
                     String url = "http://" + NetUtils
@@ -1303,7 +1314,7 @@ public class Env {
                     conn.setConnectTimeout(2 * 1000);
                     conn.setReadTimeout(2 * 1000);
                     String clusterIdString = conn.getHeaderField(MetaBaseAction.CLUSTER_ID);
-                    int remoteClusterId = Integer.parseInt(clusterIdString);
+                    long remoteClusterId = Long.parseLong(clusterIdString);
                     if (remoteClusterId != clusterId) {
                         LOG.error("cluster id is not equal with helper node {}. will exit.",
                                 rightHelperNode.getHost());
@@ -2060,7 +2071,7 @@ public class Env {
 
     public void loadImage(String imageDir) throws IOException, DdlException {
         Storage storage = new Storage(imageDir);
-        clusterId = storage.getClusterID();
+        getClusterIdFromStorage(storage);
         File curFile = storage.getCurrentImageFile();
         if (!curFile.exists()) {
             // image.0 may not exist
@@ -4162,7 +4173,7 @@ public class Env {
         }
     }
 
-    public int getClusterId() {
+    public long getClusterId() {
         return this.clusterId;
     }
 

@@ -2241,9 +2241,17 @@ public class FrontendServiceImpl implements FrontendService.Iface {
         TFrontendPingFrontendResult result = new TFrontendPingFrontendResult();
         result.setStatus(TFrontendPingFrontendStatusCode.OK);
         if (isReady) {
-            if (request.getClusterId() != Env.getCurrentEnv().getClusterId()) {
+            if (request.getClusterId() != (int) (Env.getCurrentEnv().getClusterId() & 0x7FFFFFFFL)) {
                 result.setStatus(TFrontendPingFrontendStatusCode.FAILED);
                 result.setMsg("invalid cluster id: " + Env.getCurrentEnv().getClusterId());
+            }
+
+            if (request.isSetClusterId64()) {
+                if (request.getClusterId64() != Env.getCurrentEnv().getClusterId()) {
+                    result.setStatus(TFrontendPingFrontendStatusCode.FAILED);
+                    result.setMsg("invalid cluster id: " + request.getClusterId64()
+                            + ", expected: " + Env.getCurrentEnv().getClusterId());
+                }
             }
 
             if (result.getStatus() == TFrontendPingFrontendStatusCode.OK) {

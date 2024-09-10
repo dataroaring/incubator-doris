@@ -223,7 +223,7 @@ public class MetaService extends RestBaseController {
 
         try {
             Storage storage = new Storage(imageDir.getAbsolutePath());
-            response.setHeader(MetaBaseAction.CLUSTER_ID, Integer.toString(storage.getClusterID()));
+            response.setHeader(MetaBaseAction.CLUSTER_ID, Long.toString(storage.getClusterID()));
             response.setHeader(MetaBaseAction.TOKEN, storage.getToken());
         } catch (IOException e) {
             return ResponseEntityBuilder.internalError(e.getMessage());

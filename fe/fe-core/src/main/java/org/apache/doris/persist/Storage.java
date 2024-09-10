@@ -56,7 +56,7 @@ public class Storage {
     public static final String VERSION_FILE = "VERSION";
     public static final String ROLE_FILE = "ROLE";
 
-    private int clusterID = 0;
+    private long clusterID = 0;
     private String token;
     private FrontendNodeType role = FrontendNodeType.UNKNOWN;
     private String nodeName;
@@ -66,13 +66,13 @@ public class Storage {
     private String metaDir;
     private List<Long> editsFileSequenceNumbers;
 
-    public Storage(int clusterID, String token, String metaDir) {
+    public Storage(long clusterID, String token, String metaDir) {
         this.clusterID = clusterID;
         this.token = token;
         this.metaDir = metaDir;
     }
 
-    public Storage(int clusterID, String token, long latestImageSeq, long editsSeq, String metaDir) {
+    public Storage(long clusterID, String token, long latestImageSeq, long editsSeq, String metaDir) {
         this.clusterID = clusterID;
         this.token = token;
         this.editsSeq = editsSeq;
@@ -100,7 +100,7 @@ public class Storage {
             try (FileInputStream in = new FileInputStream(versionFile)) {
                 prop.load(in);
             }
-            clusterID = Integer.parseInt(prop.getProperty(CLUSTER_ID));
+            clusterID = Long.parseLong(prop.getProperty(CLUSTER_ID));
             if (prop.getProperty(TOKEN) != null) {
                 token = prop.getProperty(TOKEN);
             }
@@ -149,7 +149,7 @@ public class Storage {
         latestValidatedImageSeq = imageIds.size() < 2 ? 0 : imageIds.get(imageIds.size() - 2);
     }
 
-    public int getClusterID() {
+    public long getClusterID() {
         return clusterID;
     }
 
@@ -185,10 +185,10 @@ public class Storage {
         return editsSeq;
     }
 
-    public static int newClusterID() {
+    public static long newClusterID() {
         Random random = new SecureRandom();
 
-        int newID = 0;
+        long newID = 0;
         while (newID == 0) {
             newID = random.nextInt(0x7FFFFFFF);
         }

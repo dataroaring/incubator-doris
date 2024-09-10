@@ -88,9 +88,11 @@ public class HeartbeatMgr extends MasterDaemon {
         this.heartbeatFlags = new HeartbeatFlags();
     }
 
-    public void setMaster(int clusterId, String token, long epoch) {
+    public void setMaster(long clusterId, String token, long epoch) {
         TMasterInfo tMasterInfo = new TMasterInfo(
-                new TNetworkAddress(FrontendOptions.getLocalHostAddress(), Config.rpc_port), clusterId, epoch);
+                new TNetworkAddress(FrontendOptions.getLocalHostAddress(),
+                                    Config.rpc_port), (int) (clusterId & 0x7FFFFFFFL), epoch);
+
         tMasterInfo.setToken(token);
         tMasterInfo.setHttpPort(Config.http_port);
         long flags = heartbeatFlags.getHeartbeatFlags();
@@ -99,7 +101,7 @@ public class HeartbeatMgr extends MasterDaemon {
             // Set cloud_instance_id and meta_service_endpoint even if there are empty
             // Be can knowns that fe is working in cloud mode.
             // Set the cloud instance ID for cloud deployment identification
-            tMasterInfo.setCloudInstanceId(Config.cloud_instance_id);
+            tMasterInfo.setClusterId64(Config.cluster_id);
             // Set the endpoint for the metadata service in cloud mode
             tMasterInfo.setMetaServiceEndpoint(Config.meta_service_endpoint);
         }
@@ -338,10 +340,10 @@ public class HeartbeatMgr extends MasterDaemon {
     // frontend heartbeat
     public static class FrontendHeartbeatHandler implements Callable<HeartbeatResponse> {
         private Frontend fe;
-        private int clusterId;
+        private long clusterId;
         private String token;
 
-        public FrontendHeartbeatHandler(Frontend fe, int clusterId, String token) {
+        public FrontendHeartbeatHandler(Frontend fe, long clusterId, String token) {
             this.fe = fe;
             this.clusterId = clusterId;
             this.token = token;
@@ -373,7 +375,9 @@ public class HeartbeatMgr extends MasterDaemon {
             boolean ok = false;
             try {
                 client = ClientPool.frontendHeartbeatPool.borrowObject(addr);
-                TFrontendPingFrontendRequest request = new TFrontendPingFrontendRequest(clusterId, token);
+                TFrontendPingFrontendRequest request = new TFrontendPingFrontendRequest(
+                        (int) (clusterId & 0x7FFFFFFFL), token);
+                request.setClusterId64(clusterId);
                 TFrontendPingFrontendResult result = client.ping(request);
                 ok = true;
                 if (result.getStatus() == TFrontendPingFrontendStatusCode.OK) {

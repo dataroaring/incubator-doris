@@ -149,7 +149,7 @@ public class FrontendsProcNode implements ProcNodeInterface {
             //e.g.  fdbd:ff1:ce00:1c26::d8 and fdbd:ff1:ce00:1c26:0:0:d8
             info.add(String.valueOf(socketAddress.equals(master)));
 
-            info.add(Integer.toString(env.getClusterId()));
+            info.add(Long.toString(env.getClusterId()));
             info.add(String.valueOf(isJoin(allFe, fe)));
 
             if (fe.getHost().equals(env.getSelfNode().getHost())) {

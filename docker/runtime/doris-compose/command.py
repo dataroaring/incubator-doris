@@ -434,7 +434,7 @@ class UpCommand(Command):
                 args.be_config, args.ms_config, args.recycle_config,
                 args.fe_follower, args.be_disks, args.be_cluster, args.reg_be,
                 args.coverage_dir, cloud_store_config, args.sql_mode_node_mgr,
-                args.no_be_metaservice_endpoint, args.no_be_cloud_instanceid)
+                args.be_metaservice_endpoint, args.be_cluster_id)
             LOG.info("Create new cluster {} succ, cluster path is {}".format(
                 args.NAME, cluster.get_path()))
 
