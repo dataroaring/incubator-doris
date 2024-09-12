@@ -966,6 +966,7 @@ Status Tablet::capture_consistent_versions(const Version& spec_version,
                              << ", version already has been merged. spec_version: " << spec_version
                              << ", max_version: " << max_version_unlocked();
             }
+            DCHECK(FALSE) << "-230 happens";
             status = Status::Error<VERSION_ALREADY_MERGED>(
                     "missed_versions is empty, spec_version "
                     "{}, max_version {}, tablet_id {}",
