@@ -17,9 +17,12 @@
 
 package org.apache.doris.common;
 
+import org.apache.doris.persist.meta.FeMetaFormat;
+
 public class FeConstants {
-    // Database and table's default configurations, we will never change them
-    public static short default_replication_num = 3;
+    // The default value of bucket setting && auto bucket without estimate_partition_size
+    public static int default_bucket_num = 10;
+
     /*
      * Those two fields is responsible for determining the default key columns in duplicate table.
      * If user does not specify key of duplicate table in create table stmt,
@@ -31,17 +34,18 @@ public class FeConstants {
     public static int shortkey_max_column_count = 3;
     public static int shortkey_maxsize_bytes = 36;
 
-    public static int heartbeat_interval_second = 5;
     public static int checkpoint_interval_second = 60; // 1 minutes
-
-    // dpp version
-    public static String dpp_version = "3_2_0";
 
     // bloom filter false positive probability
     public static double default_bloom_filter_fpp = 0.05;
 
     // set to true to skip some step when running FE unit test
     public static boolean runningUnitTest = false;
+
+    // set to false to disable internal schema db
+    public static boolean enableInternalSchemaDb = true;
+
+    public static boolean disableWGCheckerForUT = false;
 
     // default scheduler interval is 10 seconds
     public static int default_scheduler_interval_millisecond = 10000;
@@ -56,8 +60,11 @@ public class FeConstants {
     // use \N to indicate NULL
     public static String null_string = "\\N";
 
-    public static long tablet_checker_interval_ms = 20 * 1000L;
-    public static String csv = "csv";
-    public static String csv_with_names = "csv_with_names";
-    public static String csv_with_names_and_types = "csv_with_names_and_types";
+    // use for copy into test
+    public static boolean disablePreHeat = false;
+
+    public static final String INTERNAL_DB_NAME = "__internal_schema";
+    public static final String INTERNAL_FILE_CACHE_HOTSPOT_TABLE_NAME = "cloud_cache_hotspot";
+
+    public static String METADATA_FAILURE_RECOVERY_KEY = "metadata_failure_recovery";
 }

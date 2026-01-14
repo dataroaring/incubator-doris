@@ -17,28 +17,30 @@
 
 #pragma once
 
-#include "vec/columns/column.h"
-#include "vec/columns/column_const.h"
-#include "vec/exprs/vexpr.h"
-
-#include <iostream>
 #include <string>
+
+#include "common/object_pool.h"
+#include "common/status.h"
+#include "vec/data_types/data_type.h"
+#include "vec/exprs/vexpr.h"
 
 namespace doris {
 class TExprNode;
 
 namespace vectorized {
+class Block;
+class VExprContext;
+
 class VInfoFunc : public VExpr {
+    ENABLE_FACTORY_CREATOR(VInfoFunc);
+
 public:
     VInfoFunc(const TExprNode& node);
-    virtual ~VInfoFunc() {}
+    ~VInfoFunc() override = default;
 
-    virtual VExpr* clone(doris::ObjectPool* pool) const override {
-        return pool->add(new VInfoFunc(*this));
-    }
-    virtual const std::string& expr_name() const override { return _expr_name; }
-    virtual Status execute(VExprContext* context, vectorized::Block* block,
-                           int* result_column_id) override;
+    const std::string& expr_name() const override { return _expr_name; }
+    Status execute_column(VExprContext* context, const Block* block, size_t count,
+                          ColumnPtr& result_column) const override;
 
 private:
     const std::string _expr_name = "vinfofunc expr";

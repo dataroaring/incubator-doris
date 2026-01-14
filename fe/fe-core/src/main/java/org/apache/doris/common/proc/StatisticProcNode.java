@@ -17,17 +17,15 @@
 
 package org.apache.doris.common.proc;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DatabaseIf;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
-import org.apache.doris.catalog.ReplicaAllocation;
-import org.apache.doris.catalog.Table.TableType;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.system.SystemInfoService;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -36,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -44,22 +43,25 @@ public class StatisticProcNode implements ProcNodeInterface {
             .add("DbId").add("DbName").add("TableNum").add("PartitionNum")
             .add("IndexNum").add("TabletNum").add("ReplicaNum")
             .build();
-    private Catalog catalog;
+    private Env env;
 
-    public StatisticProcNode(Catalog catalog) {
-        Preconditions.checkNotNull(catalog);
-        this.catalog = catalog;
+    private ForkJoinPool taskPool = new ForkJoinPool();
+
+    public StatisticProcNode(Env env) {
+        Preconditions.checkNotNull(env);
+        this.env = env;
     }
 
     @Override
     public ProcResult fetchResult() throws AnalysisException {
-        List<DBStatistic> statistics = catalog.getDbIds().parallelStream()
-                // skip information_schema database
-                .flatMap(id -> Stream.of(id == 0 ? null : catalog.getDbNullable(id)))
-                .filter(Objects::nonNull).map(DBStatistic::new)
-                // sort by dbName
-                .sorted(Comparator.comparing(db -> db.db.getFullName()))
-                .collect(Collectors.toList());
+        List<DBStatistic> statistics = taskPool.submit(() ->
+                env.getInternalCatalog().getDbIds().parallelStream()
+                    // skip information_schema database
+                    .flatMap(id -> Stream.of(id == 0 ? null : env.getCatalogMgr().getDbNullable(id)))
+                    .filter(Objects::nonNull).map(DBStatistic::new)
+                    // sort by dbName
+                    .sorted(Comparator.comparing(db -> db.db.getFullName())).collect(Collectors.toList())
+        ).join();
 
         List<List<String>> rows = new ArrayList<>(statistics.size() + 1);
         for (DBStatistic statistic : statistics) {
@@ -72,7 +74,7 @@ public class StatisticProcNode implements ProcNodeInterface {
 
     static class DBStatistic {
         boolean summary;
-        Database db;
+        DatabaseIf<TableIf> db;
         int dbNum;
         int tableNum;
         int partitionNum;
@@ -84,33 +86,34 @@ public class StatisticProcNode implements ProcNodeInterface {
             this.summary = true;
         }
 
-        DBStatistic(Database db) {
+        DBStatistic(DatabaseIf db) {
             Preconditions.checkNotNull(db);
             this.summary = false;
             this.db = db;
             this.dbNum = 1;
 
-            SystemInfoService infoService = Catalog.getCurrentSystemInfo();
-            db.getTables().stream().filter(t -> t != null && t.getType() == TableType.OLAP).forEach(t -> {
+            this.db.getTables().stream().filter(Objects::nonNull).forEach(t -> {
                 ++tableNum;
-                OlapTable olapTable = (OlapTable) t;
-                olapTable.readLock();
-                try {
-                    for (Partition partition : olapTable.getAllPartitions()) {
-                        ReplicaAllocation replicaAlloc = olapTable.getPartitionInfo().getReplicaAllocation(partition.getId());
-                        ++partitionNum;
-                        for (MaterializedIndex materializedIndex : partition.getMaterializedIndices(IndexExtState.VISIBLE)) {
-                            ++indexNum;
-                            List<Tablet> tablets = materializedIndex.getTablets();
-                            for (int i = 0; i < tablets.size(); ++i) {
-                                Tablet tablet = tablets.get(i);
-                                ++tabletNum;
-                                replicaNum += tablet.getReplicas().size();
-                            } // end for tablets
-                        } // end for indices
-                    } // end for partitions
-                } finally {
-                    olapTable.readUnlock();
+                if (t.isManagedTable()) {
+                    OlapTable olapTable = (OlapTable) t;
+                    olapTable.readLock();
+                    try {
+                        for (Partition partition : olapTable.getAllPartitions()) {
+                            ++partitionNum;
+                            for (MaterializedIndex materializedIndex : partition.getMaterializedIndices(
+                                    IndexExtState.VISIBLE)) {
+                                ++indexNum;
+                                List<Tablet> tablets = materializedIndex.getTablets();
+                                for (int i = 0; i < tablets.size(); ++i) {
+                                    Tablet tablet = tablets.get(i);
+                                    ++tabletNum;
+                                    replicaNum += tablet.getReplicas().size();
+                                } // end for tablets
+                            } // end for indices
+                        } // end for partitions
+                    } finally {
+                        olapTable.readUnlock();
+                    }
                 }
             });
         }

@@ -58,12 +58,18 @@ public class ResponseEntityBuilder {
     }
 
     public static ResponseEntity internalError(Object data) {
-        ResponseBody body = new ResponseBody().code(RestApiStatusCode.INTERNAL_SERVER_ERROR).msg("Internal Error").data(data);
+        ResponseBody body = new ResponseBody().code(RestApiStatusCode.INTERNAL_SERVER_ERROR)
+                .msg("Internal Error").data(data);
         return ResponseEntity.status(HttpStatus.OK).body(body);
     }
 
     public static ResponseEntity notFound(Object data) {
         ResponseBody body = new ResponseBody().code(RestApiStatusCode.NOT_FOUND).msg("Not Found").data(data);
         return ResponseEntity.status(HttpStatus.OK).body(body);
+    }
+
+    public static ResponseEntity serviceUnavailable(String msg) {
+        ResponseBody body = new ResponseBody().code(RestApiStatusCode.SERVICE_UNAVAILABLE).msg(msg);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
     }
 }

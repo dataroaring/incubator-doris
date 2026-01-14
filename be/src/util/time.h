@@ -18,8 +18,7 @@
 // https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/time.h
 // and modified by Doris
 
-#ifndef DORIS_BE_UTIL_TIME_H
-#define DORIS_BE_UTIL_TIME_H
+#pragma once
 
 #include <stdint.h>
 #include <time.h>
@@ -73,6 +72,13 @@ inline int64_t GetCurrentTimeMicros() {
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return ts.tv_sec * MICROS_PER_SEC + ts.tv_nsec / NANOS_PER_MICRO;
+}
+
+// Returns the time since the Epoch measured in nanoseconds.
+inline int64_t GetCurrentTimeNanos() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec * NANOS_PER_SEC + ts.tv_nsec;
 }
 
 /// Returns the number of milliseconds that have passed since the Unix epoch. This is
@@ -129,4 +135,3 @@ std::string ToStringFromUnixMicros(int64_t us, TimePrecision p = TimePrecision::
 std::string ToUtcStringFromUnixMicros(int64_t us, TimePrecision p = TimePrecision::Microsecond);
 
 } // namespace doris
-#endif

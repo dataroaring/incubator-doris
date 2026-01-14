@@ -17,14 +17,17 @@
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "common/status.h"
 #include "http/http_method.h"
 #include "util/path_trie.hpp"
+
+struct event_base;
+struct evhttp;
 
 namespace doris {
 
@@ -51,7 +54,12 @@ public:
     int on_header(struct evhttp_request* ev_req);
 
     // get real port
-    int get_real_port() { return _real_port; }
+    int get_real_port() const { return _real_port; }
+
+    std::vector<std::shared_ptr<event_base>> get_event_bases() {
+        std::lock_guard lock(_event_bases_lock);
+        return _event_bases;
+    }
 
 private:
     Status _bind();
@@ -67,8 +75,9 @@ private:
 
     int _server_fd = -1;
     std::unique_ptr<ThreadPool> _workers;
-    std::mutex _event_bases_lock; // protect _event_bases
+    std::mutex _event_bases_lock; // protect _event_bases and _evhttp_servers
     std::vector<std::shared_ptr<event_base>> _event_bases;
+    std::vector<std::shared_ptr<evhttp>> _evhttp_servers;
 
     std::mutex _handler_lock;
     PathTrie<HttpHandler*> _get_handlers;
@@ -78,6 +87,7 @@ private:
     PathTrie<HttpHandler*> _delete_handlers;
     PathTrie<HttpHandler*> _head_handlers;
     PathTrie<HttpHandler*> _options_handlers;
+    bool _started = false;
 };
 
 } // namespace doris

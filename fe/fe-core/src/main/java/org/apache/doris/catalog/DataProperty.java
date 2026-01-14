@@ -18,33 +18,32 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.common.Config;
-import org.apache.doris.common.FeMetaVersion;
-import org.apache.doris.common.io.Text;
-import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.TimeUtils;
-import org.apache.doris.persist.gson.GsonUtils;
+import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.thrift.TStorageMedium;
 
+import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
 
-import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
+import java.util.Objects;
 
-public class DataProperty implements Writable {
-    public static final DataProperty DEFAULT_DATA_PROPERTY = new DataProperty(
-            "SSD".equalsIgnoreCase(Config.default_storage_medium) ? TStorageMedium.SSD : TStorageMedium.HDD
-    );
+public class DataProperty implements GsonPostProcessable {
+    public static final TStorageMedium DEFAULT_STORAGE_MEDIUM = "SSD".equalsIgnoreCase(Config.default_storage_medium)
+            ? TStorageMedium.SSD : TStorageMedium.HDD;
     public static final long MAX_COOLDOWN_TIME_MS = 253402271999000L; // 9999-12-31 23:59:59
 
-    @SerializedName(value =  "storageMedium")
+    public static final DataProperty DEFAULT_HDD_DATA_PROPERTY = new DataProperty(TStorageMedium.HDD);
+
+    @SerializedName(value = "storageMedium")
     private TStorageMedium storageMedium;
-    @SerializedName(value =  "cooldownTimeMs")
+    @SerializedName(value = "cooldownTimeMs")
     private long cooldownTimeMs;
-    @SerializedName(value = "remoteStorageResourceName")
-    private String remoteStorageResourceName;
-    @SerializedName(value = "remoteCooldownTimeMs")
-    private long remoteCooldownTimeMs;
+    @SerializedName(value = "storagePolicy")
+    private String storagePolicy;
+    @SerializedName(value = "isMutable")
+    private boolean isMutable = true;
+    private boolean storageMediumSpecified;
 
     private DataProperty() {
         // for persist
@@ -52,22 +51,33 @@ public class DataProperty implements Writable {
 
     public DataProperty(TStorageMedium medium) {
         this.storageMedium = medium;
-        if (medium == TStorageMedium.SSD) {
-            long currentTimeMs = System.currentTimeMillis();
-            this.cooldownTimeMs = currentTimeMs + Config.storage_cooldown_second * 1000L;
-        } else {
-            this.cooldownTimeMs = MAX_COOLDOWN_TIME_MS;
-        }
-        this.remoteStorageResourceName = "";
-        this.remoteCooldownTimeMs = MAX_COOLDOWN_TIME_MS;
+        this.cooldownTimeMs = MAX_COOLDOWN_TIME_MS;
+        this.storagePolicy = "";
     }
 
-    public DataProperty(TStorageMedium medium, long cooldown,
-                        String remoteStorageResourceName, long remoteCooldownTimeMs) {
+    public DataProperty(DataProperty other) {
+        this.storageMedium = other.storageMedium;
+        this.cooldownTimeMs = other.cooldownTimeMs;
+        this.storagePolicy = other.storagePolicy;
+        this.isMutable = other.isMutable;
+    }
+
+    /**
+     * DataProperty construction.
+     *
+     * @param medium storage medium for the init storage of the table
+     * @param cooldown cool down time for SSD->HDD
+     * @param storagePolicy remote storage policy for remote storage
+     */
+    public DataProperty(TStorageMedium medium, long cooldown, String storagePolicy) {
+        this(medium, cooldown, storagePolicy, true);
+    }
+
+    public DataProperty(TStorageMedium medium, long cooldown, String storagePolicy, boolean isMutable) {
         this.storageMedium = medium;
         this.cooldownTimeMs = cooldown;
-        this.remoteStorageResourceName = remoteStorageResourceName;
-        this.remoteCooldownTimeMs = remoteCooldownTimeMs;
+        this.storagePolicy = storagePolicy;
+        this.isMutable = isMutable;
     }
 
     public TStorageMedium getStorageMedium() {
@@ -78,35 +88,37 @@ public class DataProperty implements Writable {
         return cooldownTimeMs;
     }
 
-    public long getRemoteCooldownTimeMs() {
-        return remoteCooldownTimeMs;
+    public String getStoragePolicy() {
+        return storagePolicy;
     }
 
-    public String getRemoteStorageResourceName() {
-        return remoteStorageResourceName;
+    public void setStoragePolicy(String storagePolicy) {
+        this.storagePolicy = storagePolicy;
     }
 
-    public static DataProperty read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_108) {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, DataProperty.class);
-        }
-        DataProperty dataProperty = new DataProperty();
-        dataProperty.readFields(in);
-        return dataProperty;
+    public boolean isStorageMediumSpecified() {
+        return storageMediumSpecified;
+    }
+
+    public boolean isMutable() {
+        return isMutable;
+    }
+
+    public void setMutable(boolean mutable) {
+        isMutable = mutable;
+    }
+
+    public void setStorageMediumSpecified(boolean isSpecified) {
+        storageMediumSpecified = isSpecified;
+    }
+
+    public void setStorageMedium(TStorageMedium medium) {
+        this.storageMedium = medium;
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        String json = GsonUtils.GSON.toJson(this);
-        Text.writeString(out, json);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        storageMedium = TStorageMedium.valueOf(Text.readString(in));
-        cooldownTimeMs = in.readLong();
-        remoteStorageResourceName = "";
-        remoteCooldownTimeMs = MAX_COOLDOWN_TIME_MS;
+    public int hashCode() {
+        return Objects.hash(storageMedium, cooldownTimeMs, storagePolicy);
     }
 
     @Override
@@ -123,8 +135,8 @@ public class DataProperty implements Writable {
 
         return this.storageMedium == other.storageMedium
                 && this.cooldownTimeMs == other.cooldownTimeMs
-                && this.remoteCooldownTimeMs == other.remoteCooldownTimeMs
-                && this.remoteStorageResourceName.equals(other.remoteStorageResourceName);
+                && Strings.nullToEmpty(this.storagePolicy).equals(Strings.nullToEmpty(other.storagePolicy))
+                && this.isMutable == other.isMutable;
     }
 
     @Override
@@ -132,8 +144,14 @@ public class DataProperty implements Writable {
         StringBuilder sb = new StringBuilder();
         sb.append("Storage medium[").append(this.storageMedium).append("]. ");
         sb.append("cool down[").append(TimeUtils.longToTimeString(cooldownTimeMs)).append("]. ");
-        sb.append("remote storage resource name[").append(this.remoteStorageResourceName).append("]. ");
-        sb.append("remote cool down[").append(TimeUtils.longToTimeString(remoteCooldownTimeMs)).append("].");
+        sb.append("remote storage policy[").append(this.storagePolicy).append("]. ");
         return sb.toString();
     }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        // storagePolicy is a newly added field, it may be null when replaying from old version.
+        this.storagePolicy = Strings.nullToEmpty(this.storagePolicy);
+    }
+
 }

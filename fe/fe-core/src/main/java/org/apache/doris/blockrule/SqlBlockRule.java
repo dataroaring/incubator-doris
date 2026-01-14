@@ -17,15 +17,18 @@
 
 package org.apache.doris.blockrule;
 
-import org.apache.doris.analysis.AlterSqlBlockRuleStmt;
-import org.apache.doris.analysis.CreateSqlBlockRuleStmt;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.SqlBlockUtil;
+import org.apache.doris.metric.LongCounterMetric;
+import org.apache.doris.metric.Metric.MetricUnit;
+import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.persist.gson.GsonUtils;
 
+import com.codahale.metrics.Histogram;
+import com.codahale.metrics.SlidingWindowReservoir;
 import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
-
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.DataInput;
@@ -34,11 +37,12 @@ import java.io.IOException;
 import java.util.List;
 import java.util.regex.Pattern;
 
-public class SqlBlockRule implements Writable {
+/**
+ * Use for block some sql by rule.
+ **/
+public class SqlBlockRule implements Writable, GsonPostProcessable {
 
     public static final String NAME_TYPE = "SQL BLOCK RULE NAME";
-
-    public static final String DEFAULT_USER = "default";
 
     // the rule name, cluster unique
     @SerializedName(value = "name")
@@ -72,12 +76,14 @@ public class SqlBlockRule implements Writable {
     private Boolean enable;
 
     private Pattern sqlPattern;
+    private Histogram tryBlockHistogram;
+    private LongCounterMetric blockCount;
 
-    public SqlBlockRule(String name) {
-        this.name = name;
-    }
-
-    public SqlBlockRule(String name, String sql, String sqlHash, Long partitionNum, Long tabletNum, Long cardinality, Boolean global, Boolean enable) {
+    /**
+     * Create SqlBlockRule.
+     **/
+    public SqlBlockRule(String name, String sql, String sqlHash, Long partitionNum, Long tabletNum, Long cardinality,
+            Boolean global, Boolean enable) {
         this.name = name;
         this.sql = sql;
         this.sqlHash = sqlHash;
@@ -89,14 +95,14 @@ public class SqlBlockRule implements Writable {
         if (StringUtils.isNotEmpty(sql)) {
             this.sqlPattern = Pattern.compile(sql);
         }
+        this.tryBlockHistogram = new Histogram(new SlidingWindowReservoir(1000));
+        this.blockCount = new LongCounterMetric("blocks", MetricUnit.ROWS, "");
     }
 
-    public static SqlBlockRule fromCreateStmt(CreateSqlBlockRuleStmt stmt) {
-        return new SqlBlockRule(stmt.getRuleName(), stmt.getSql(), stmt.getSqlHash(), stmt.getPartitionNum(), stmt.getTabletNum(), stmt.getCardinality(), stmt.isGlobal(), stmt.isEnable());
-    }
-
-    public static SqlBlockRule fromAlterStmt(AlterSqlBlockRuleStmt stmt) {
-        return new SqlBlockRule(stmt.getRuleName(), stmt.getSql(), stmt.getSqlHash(), stmt.getPartitionNum(), stmt.getTabletNum(), stmt.getCardinality(), stmt.getGlobal(), stmt.getEnable());
+    // for gson
+    public SqlBlockRule() {
+        this.tryBlockHistogram = new Histogram(new SlidingWindowReservoir(1000));
+        this.blockCount = new LongCounterMetric("blocks", MetricUnit.ROWS, "");
     }
 
     public String getName() {
@@ -167,12 +173,23 @@ public class SqlBlockRule implements Writable {
         this.enable = enable;
     }
 
+    /**
+     * Show SqlBlockRule info.
+     **/
     public List<String> getShowInfo() {
         return Lists.newArrayList(this.name, this.sql, this.sqlHash,
                 this.partitionNum == null ? "0" : Long.toString(this.partitionNum),
                 this.tabletNum == null ? "0" : Long.toString(this.tabletNum),
-                this.cardinality == null ? "0" : Long.toString(this.cardinality),
-                String.valueOf(this.global), String.valueOf(this.enable));
+                this.cardinality == null ? "0" : Long.toString(this.cardinality), String.valueOf(this.global),
+                String.valueOf(this.enable));
+    }
+
+    public Histogram getTryBlockHistogram() {
+        return tryBlockHistogram;
+    }
+
+    public LongCounterMetric getBlockCount() {
+        return blockCount;
     }
 
     @Override
@@ -180,10 +197,19 @@ public class SqlBlockRule implements Writable {
         Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
+    /**
+     * Read data from file.
+     **/
     public static SqlBlockRule read(DataInput in) throws IOException {
         String json = Text.readString(in);
-        SqlBlockRule sqlBlockRule = GsonUtils.GSON.fromJson(json, SqlBlockRule.class);
-        sqlBlockRule.setSqlPattern(Pattern.compile(sqlBlockRule.getSql()));
-        return sqlBlockRule;
+        return GsonUtils.GSON.fromJson(json, SqlBlockRule.class);
+    }
+
+    @Override
+    public void gsonPostProcess() {
+        if (StringUtils.isNotEmpty(this.getSql()) && !SqlBlockUtil.STRING_DEFAULT.equals(
+                this.getSql())) {
+            this.setSqlPattern(Pattern.compile(this.getSql()));
+        }
     }
 }

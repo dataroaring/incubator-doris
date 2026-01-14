@@ -17,15 +17,19 @@
 
 package org.apache.doris.httpv2.rest.manager;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.httpv2.entity.ResponseBody;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.system.Frontend;
+import org.apache.doris.system.SystemInfoService.HostInfo;
 
+import com.google.common.base.Strings;
 import com.google.gson.reflect.TypeToken;
-
+import jakarta.servlet.http.HttpServletRequest;
+import org.apache.commons.io.IOUtils;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
@@ -34,9 +38,13 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.util.EntityUtils;
-import org.apache.parquet.Strings;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,12 +54,20 @@ import java.util.stream.Collectors;
  * used to forward http requests from manager to be.
  */
 public class HttpUtils {
+    private static final Logger LOG = LogManager.getLogger(HttpUtils.class);
+
     static final int REQUEST_SUCCESS_CODE = 0;
+    static final int DEFAULT_TIME_OUT_MS = 2000;
 
     static List<Pair<String, Integer>> getFeList() {
-        return Catalog.getCurrentCatalog().getFrontends(null)
-                .stream().filter(Frontend::isAlive).map(fe -> new Pair<>(fe.getHost(), Config.http_port))
+        return Env.getCurrentEnv().getFrontends(null)
+                .stream().filter(Frontend::isAlive).map(fe -> Pair.of(fe.getHost(), Config.http_port))
                 .collect(Collectors.toList());
+    }
+
+    static boolean isCurrentFe(String ip, int port) {
+        HostInfo hostInfo = Env.getCurrentEnv().getSelfNode();
+        return hostInfo.isSame(new HostInfo(ip, port));
     }
 
     static String concatUrl(Pair<String, Integer> ipPort, String path, Map<String, String> arguments) {
@@ -72,10 +88,14 @@ public class HttpUtils {
         return url.toString();
     }
 
-    static String doGet(String url, Map<String, String> headers) throws IOException {
+    public static String doGet(String url, Map<String, String> headers, int timeoutMs) throws IOException {
         HttpGet httpGet = new HttpGet(url);
-        setRequestConfig(httpGet, headers);
+        setRequestConfig(httpGet, headers, timeoutMs);
         return executeRequest(httpGet);
+    }
+
+    public static String doGet(String url, Map<String, String> headers) throws IOException {
+        return doGet(url, headers, DEFAULT_TIME_OUT_MS);
     }
 
     static String doPost(String url, Map<String, String> headers, Object body) throws IOException {
@@ -86,11 +106,11 @@ public class HttpUtils {
             httpPost.setEntity(stringEntity);
         }
 
-        setRequestConfig(httpPost, headers);
+        setRequestConfig(httpPost, headers, DEFAULT_TIME_OUT_MS);
         return executeRequest(httpPost);
     }
 
-    private static void setRequestConfig(HttpRequestBase request, Map<String, String> headers) {
+    private static void setRequestConfig(HttpRequestBase request, Map<String, String> headers, int timeoutMs) {
         if (null != headers) {
             for (String key : headers.keySet()) {
                 request.setHeader(key, headers.get(key));
@@ -98,15 +118,19 @@ public class HttpUtils {
         }
 
         RequestConfig config = RequestConfig.custom()
-                .setConnectTimeout(2000)
-                .setConnectionRequestTimeout(2000)
-                .setSocketTimeout(2000)
+                .setConnectTimeout(timeoutMs)
+                .setConnectionRequestTimeout(timeoutMs)
+                .setSocketTimeout(timeoutMs)
                 .build();
         request.setConfig(config);
     }
 
+    public static CloseableHttpClient getHttpClient() {
+        return HttpClientBuilder.create().build();
+    }
+
     private static String executeRequest(HttpRequestBase request) throws IOException {
-        CloseableHttpClient client = HttpClientBuilder.create().build();
+        CloseableHttpClient client = getHttpClient();
         return client.execute(request, httpResponse -> EntityUtils.toString(httpResponse.getEntity()));
     }
 
@@ -116,5 +140,71 @@ public class HttpUtils {
             throw new RuntimeException(responseEntity.getMsg());
         }
         return GsonUtils.GSON.toJson(responseEntity.getData());
+    }
+
+    public static String getBody(HttpServletRequest request) throws IOException {
+        return IOUtils.toString(request.getInputStream(), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Get the file size of the HTTP resource by sending a HEAD request.
+     * This method uses HTTP HEAD request to get the Content-Length header
+     * without downloading the entire file content.
+     * @param uri the HTTP URI to get file size for
+     * @return the file size in bytes, or -1 if the size cannot be determined
+     * @throws IOException if there's an error connecting to the HTTP resource
+     * @throws IllegalArgumentException if the URI is null or invalid
+     */
+    public static long getHttpFileSize(String uri, Map<String, String> headers) throws IOException {
+        if (uri == null || uri.trim().isEmpty()) {
+            throw new IllegalArgumentException("HTTP URI is null or empty");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(uri);
+            connection = (HttpURLConnection) url.openConnection();
+
+            // Use HEAD request to get headers without downloading content
+            connection.setRequestMethod("HEAD");
+            connection.setConnectTimeout(10000); // 10 seconds connection timeout
+            connection.setReadTimeout(30000);    // 30 seconds read timeout
+
+            // Set common headers
+            connection.setRequestProperty("User-Agent", "Doris-HttpUtils/1.0");
+            connection.setRequestProperty("Accept", "*/*");
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                connection.setRequestProperty(entry.getKey(), entry.getValue());
+            }
+
+            // Connect and get response
+            connection.connect();
+            int responseCode = connection.getResponseCode();
+
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                // Try to get Content-Length header
+                String contentLengthStr = connection.getHeaderField("Content-Length");
+                if (contentLengthStr != null && !contentLengthStr.trim().isEmpty()) {
+                    try {
+                        return Long.parseLong(contentLengthStr.trim());
+                    } catch (NumberFormatException e) {
+                        throw new IOException("Invalid Content-Length header: " + contentLengthStr, e);
+                    }
+                } else {
+                    // Content-Length header not available
+                    return -1;
+                }
+            } else {
+                throw new IOException("HTTP request failed with response code: " + responseCode
+                        + ", message: " + connection.getResponseMessage());
+            }
+        } catch (IOException e) {
+            LOG.warn("Failed to get file size for URI: {}", uri, e);
+            throw new IOException("Failed to get file size for URI: " + uri + ". " + Util.getRootCauseMessage(e), e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
     }
 }

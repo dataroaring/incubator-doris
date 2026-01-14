@@ -17,7 +17,8 @@
 
 package org.apache.doris.common.proc;
 
-import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DatabaseIf;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.AnalysisException;
 
 import com.google.common.base.Joiner;
@@ -29,16 +30,16 @@ import java.util.Collections;
 public class IncompleteTabletsProcNode implements ProcNodeInterface {
     public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
             .add("ReplicaMissingTablets").add("VersionIncompleteTablets").add("ReplicaRelocatingTablets")
-            .add("RedundantTablets").add("ReplicaMissingInClusterTablets").add("ReplicaMissingForTagTablets")
+            .add("RedundantTablets").add("ReplicaMissingForTagTablets")
             .add("ForceRedundantTablets").add("ColocateMismatchTablets").add("ColocateRedundantTablets")
             .add("NeedFurtherRepairTablets").add("UnrecoverableTablets").add("ReplicaCompactionTooSlowTablets")
             .add("InconsistentTablets").add("OversizeTablets")
             .build();
     private static final Joiner JOINER = Joiner.on(",");
 
-    final Database db;
+    final DatabaseIf<TableIf> db;
 
-    public IncompleteTabletsProcNode(Database db) {
+    public IncompleteTabletsProcNode(DatabaseIf db) {
         this.db = db;
     }
 
@@ -50,7 +51,6 @@ public class IncompleteTabletsProcNode implements ProcNodeInterface {
                 JOINER.join(statistic.versionIncompleteTabletIds),
                 JOINER.join(statistic.replicaRelocatingTabletIds),
                 JOINER.join(statistic.redundantTabletIds),
-                JOINER.join(statistic.replicaMissingInClusterTabletIds),
                 JOINER.join(statistic.replicaMissingForTagTabletIds),
                 JOINER.join(statistic.forceRedundantTabletIds),
                 JOINER.join(statistic.colocateMismatchTabletIds),

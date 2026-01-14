@@ -15,21 +15,30 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_AGENT_UTILS_H
-#define DORIS_BE_SRC_AGENT_UTILS_H
+#pragma once
+
+#include <butil/macros.h>
+
+#include <map>
+#include <string>
 
 #include "common/status.h"
-#include "gen_cpp/FrontendService.h"
-#include "gen_cpp/FrontendService_types.h"
-#include "gen_cpp/HeartbeatService_types.h"
 #include "runtime/client_cache.h"
 
 namespace doris {
+class TConfirmUnusedRemoteFilesRequest;
+class TConfirmUnusedRemoteFilesResult;
+class TFinishTaskRequest;
+class TMasterResult;
+class TReportRequest;
+class ClusterInfo;
 
 class MasterServerClient {
 public:
-    MasterServerClient(const TMasterInfo& master_info, FrontendServiceClientCache* client_cache);
-    virtual ~MasterServerClient() {};
+    static MasterServerClient* create(const ClusterInfo* cluster_info);
+    static MasterServerClient* instance();
+
+    ~MasterServerClient() = default;
 
     // Report finished task to the master server
     //
@@ -38,7 +47,7 @@ public:
     //
     // Output parameters:
     // * result: The result of report task
-    virtual Status finish_task(const TFinishTaskRequest& request, TMasterResult* result);
+    Status finish_task(const TFinishTaskRequest& request, TMasterResult* result);
 
     // Report tasks/olap tablet/disk state to the master server
     //
@@ -47,20 +56,25 @@ public:
     //
     // Output parameters:
     // * result: The result of report task
-    virtual Status report(const TReportRequest& request, TMasterResult* result);
+    Status report(const TReportRequest& request, TMasterResult* result);
+
+    Status confirm_unused_remote_files(const TConfirmUnusedRemoteFilesRequest& request,
+                                       TConfirmUnusedRemoteFilesResult* result);
 
 private:
+    MasterServerClient(const ClusterInfo* cluster_info);
+
     DISALLOW_COPY_AND_ASSIGN(MasterServerClient);
 
-    // Not owner. Reference to the ExecEnv::_master_info
-    const TMasterInfo& _master_info;
-    FrontendServiceClientCache* _client_cache;
+    // Not owner. Reference to the ExecEnv::_cluster_info
+    const ClusterInfo* _cluster_info;
+    std::unique_ptr<FrontendServiceClientCache> _client_cache;
 };
 
 class AgentUtils {
 public:
-    AgentUtils() {};
-    virtual ~AgentUtils() {};
+    AgentUtils() = default;
+    virtual ~AgentUtils() = default;
 
     // Execute shell cmd
     virtual bool exec_cmd(const std::string& command, std::string* errmsg,
@@ -75,4 +89,3 @@ private:
 }; // class AgentUtils
 
 } // namespace doris
-#endif // DORIS_BE_SRC_AGENT_UTILS_H

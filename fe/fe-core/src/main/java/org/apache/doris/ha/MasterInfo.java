@@ -19,64 +19,77 @@ package org.apache.doris.ha;
 
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.persist.gson.GsonUtils;
+
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
 public class MasterInfo implements Writable {
-    
-    private String ip;
+
+    @SerializedName(value = "host", alternate = {"ip"})
+    private String host;
+    @SerializedName("httpPort")
     private int httpPort;
+    @SerializedName("rpcPort")
     private int rpcPort;
 
     public MasterInfo() {
-        this.ip = "";
+        this.host = "";
         this.httpPort = 0;
         this.rpcPort = 0;
     }
-    
-    public MasterInfo(String ip, int httpPort, int rpcPort) {
-        this.ip = ip;
+
+    public MasterInfo(String host, int httpPort, int rpcPort) {
+        this.host = host;
         this.httpPort = httpPort;
         this.rpcPort = rpcPort;
     }
 
-    public String getIp() {
-        return this.ip;
+    public String getHost() {
+        return this.host;
     }
-    
-    public void setIp(String ip) {
-        this.ip = ip;
+
+    public void setHost(String host) {
+        this.host = host;
     }
-    
+
     public int getHttpPort() {
         return this.httpPort;
     }
-    
+
     public void setHttpPort(int httpPort) {
         this.httpPort = httpPort;
     }
-    
+
     public int getRpcPort() {
         return this.rpcPort;
     }
-    
+
     public void setRpcPort(int rpcPort) {
         this.rpcPort = rpcPort;
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        Text.writeString(out, ip);
-        out.writeInt(httpPort);
-        out.writeInt(rpcPort);
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("MasterInfo: host=").append(host)
+                .append(" httpPort=").append(httpPort)
+                .append(" rpcPort=").append(rpcPort);
+        return sb.toString();
     }
 
-    public void readFields(DataInput in) throws IOException {
-        ip = Text.readString(in);
-        httpPort = in.readInt();
-        rpcPort = in.readInt();
+    @Override
+    public void write(DataOutput out) throws IOException {
+        String json = GsonUtils.GSON.toJson(this);
+        Text.writeString(out, json);
+    }
+
+    public static MasterInfo read(DataInput in) throws IOException {
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, MasterInfo.class);
     }
 
 }

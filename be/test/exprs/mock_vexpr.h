@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include "vec/exprs/vexpr.h"
 
@@ -27,10 +27,12 @@ namespace vectorized {
 
 class MockVExpr : public VExpr {
 public:
-    MOCK_CONST_METHOD1(clone, VExpr*(ObjectPool* pool));
+    MOCK_CONST_METHOD0(clone, VExprSPtr());
     MOCK_CONST_METHOD0(expr_name, const std::string&());
-    MOCK_METHOD3(execute,
-                 Status(VExprContext* context, vectorized::Block* block, int* result_column_id));
+    MOCK_CONST_METHOD3(execute, Status(VExprContext* context, vectorized::Block* block,
+                                       int* result_column_id));
+    MOCK_CONST_METHOD4(execute_column, Status(VExprContext* context, const vectorized::Block* block,
+                                              size_t count, ColumnPtr& result_column));
 }; // class MockVExpr
 
 } // namespace vectorized

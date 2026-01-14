@@ -24,7 +24,6 @@ import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Table;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -34,6 +33,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Task queue
@@ -50,7 +50,7 @@ public class AgentTaskQueue {
             addTask(task);
         }
     }
- 
+
     public static synchronized boolean addTask(AgentTask task) {
         long backendId = task.getBackendId();
         TTaskType type = task.getTaskType();
@@ -60,21 +60,19 @@ public class AgentTaskQueue {
             signatureMap = Maps.newHashMap();
             tasks.put(backendId, type, signatureMap);
         }
-        
+
         long signature = task.getSignature();
         if (signatureMap.containsKey(signature)) {
             return false;
         }
         signatureMap.put(signature, task);
         ++taskNum;
-        LOG.debug("add task: type[{}], backend[{}], signature[{}]", type, backendId, signature);
-        if (type == TTaskType.PUSH) {
-            PushTask pushTask = (PushTask) task;
-            LOG.debug("push task info: version[{}]", pushTask.getVersion());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("add task: type[{}], backend[{}], signature[{}]", type, backendId, signature);
         }
         return true;
     }
-    
+
     // remove all task in AgentBatchTask.
     // the caller should make sure all tasks in AgentBatchTask is type of 'type'
     public static synchronized void removeBatchTask(AgentBatchTask batchTask, TTaskType type) {
@@ -93,10 +91,24 @@ public class AgentTaskQueue {
             return;
         }
         signatureMap.remove(signature);
-        LOG.debug("remove task: type[{}], backend[{}], signature[{}]", type, backendId, signature);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("remove task: type[{}], backend[{}], signature[{}]", type, backendId, signature);
+        }
         --taskNum;
     }
-    
+
+    public static synchronized void removeTask(long backendId, Consumer<AgentTask> onTaskRemoved) {
+        Map<TTaskType, Map<Long, AgentTask>> tasks = AgentTaskQueue.tasks.row(backendId);
+        tasks.forEach((type, taskSet) -> {
+            Iterator<Map.Entry<Long, AgentTask>> it = taskSet.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Long, AgentTask> entry = it.next();
+                it.remove();
+                onTaskRemoved.accept(entry.getValue());
+            }
+        });
+    }
+
     /*
      * we cannot define a push task with only 'backendId', 'signature' and 'TTaskType'
      * add version and TPushType to help
@@ -119,7 +131,9 @@ public class AgentTaskQueue {
         }
 
         signatureMap.remove(signature);
-        LOG.debug("remove task: type[{}], backend[{}], signature[{}]", taskType, backendId, signature);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("remove task: type[{}], backend[{}], signature[{}]", taskType, backendId, signature);
+        }
         --taskNum;
     }
 
@@ -131,6 +145,19 @@ public class AgentTaskQueue {
         }
     }
 
+    public static synchronized boolean contains(AgentTask task) {
+        long backendId = task.getBackendId();
+        TTaskType type = task.getTaskType();
+        long signature = task.getSignature();
+
+        if (!tasks.contains(backendId, type)) {
+            return false;
+        }
+
+        Map<Long, AgentTask> signatureMap = tasks.get(backendId, type);
+        return signatureMap.containsKey(signature);
+    }
+
     public static synchronized AgentTask getTask(long backendId, TTaskType type, long signature) {
         if (!tasks.contains(backendId, type)) {
             return null;
@@ -139,11 +166,23 @@ public class AgentTaskQueue {
         Map<Long, AgentTask> signatureMap = tasks.get(backendId, type);
         return signatureMap.get(signature);
     }
-    
+
+    public static synchronized void updateTask(long backendId, TTaskType type, long signature, AgentTask newTask) {
+        if (!tasks.contains(backendId, type)) {
+            return;
+        }
+
+        Map<Long, AgentTask> signatureMap = tasks.get(backendId, type);
+        if (!signatureMap.containsKey(signature)) {
+            return;
+        }
+        signatureMap.put(signature, newTask);
+    }
+
     // this is just for unit test
     public static synchronized List<AgentTask> getTask(TTaskType type) {
         List<AgentTask> res = Lists.newArrayList();
-        for (Map<Long, AgentTask> agentTasks : tasks.column(TTaskType.ALTER).values()) {
+        for (Map<Long, AgentTask> agentTasks : tasks.column(type).values()) {
             res.addAll(agentTasks.values());
         }
         return res;
@@ -160,7 +199,7 @@ public class AgentTaskQueue {
         if (!tasks.containsRow(backendId)) {
             return diffTasks;
         }
-        
+
         Map<TTaskType, Map<Long, AgentTask>> backendAllTasks = tasks.row(backendId);
         for (Map.Entry<TTaskType, Map<Long, AgentTask>> entry : backendAllTasks.entrySet()) {
             TTaskType taskType = entry.getKey();
@@ -169,7 +208,7 @@ public class AgentTaskQueue {
             if (runningTasks.containsKey(taskType)) {
                 excludeSignatures = runningTasks.get(taskType);
             }
-            
+
             for (Map.Entry<Long, AgentTask> taskEntry : tasks.entrySet()) {
                 long signature = taskEntry.getKey();
                 AgentTask task = taskEntry.getValue();
@@ -202,7 +241,9 @@ public class AgentTaskQueue {
                 } else {
                     if (typeTasks.containsKey(tabletId)) {
                         typeTasks.remove(tabletId);
-                        LOG.debug("remove task: type[{}], backend[{}], signature[{}]", type, backendId, tabletId);
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("remove task: type[{}], backend[{}], signature[{}]", type, backendId, tabletId);
+                        }
                         --taskNum;
                     }
                 }
@@ -270,4 +311,3 @@ public class AgentTaskQueue {
         return tasks;
     }
 }
-

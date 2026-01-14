@@ -17,17 +17,17 @@
 
 #include "olap/rowset/segment_v2/ordinal_page_index.h"
 
-#include <gtest/gtest.h>
+#include <gen_cpp/segment_v2.pb.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
 
 #include <iostream>
 #include <memory>
 #include <string>
 
-#include "common/logging.h"
-#include "env/env.h"
-#include "olap/fs/fs_util.h"
-#include "olap/page_cache.h"
-#include "util/file_utils.h"
+#include "gtest/gtest_pred_impl.h"
+#include "io/fs/file_writer.h"
+#include "io/fs/local_file_system.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -37,20 +37,19 @@ public:
     const std::string kTestDir = "./ut_dir/ordinal_page_index_test";
 
     void SetUp() override {
-        if (FileUtils::check_exist(kTestDir)) {
-            EXPECT_TRUE(FileUtils::remove_all(kTestDir).ok());
-        }
-        EXPECT_TRUE(FileUtils::create_dir(kTestDir).ok());
+        auto st = io::global_local_filesystem()->delete_directory(kTestDir);
+        ASSERT_TRUE(st.ok()) << st;
+        st = io::global_local_filesystem()->create_directory(kTestDir);
+        ASSERT_TRUE(st.ok()) << st;
     }
     void TearDown() override {
-        if (FileUtils::check_exist(kTestDir)) {
-            EXPECT_TRUE(FileUtils::remove_all(kTestDir).ok());
-        }
+        EXPECT_TRUE(io::global_local_filesystem()->delete_directory(kTestDir).ok());
     }
 };
 
 TEST_F(OrdinalPageIndexTest, normal) {
     std::string filename = kTestDir + "/normal.idx";
+    auto fs = io::global_local_filesystem();
 
     OrdinalIndexWriter builder;
     // generate ordinal index for 16K data pages,
@@ -61,22 +60,21 @@ TEST_F(OrdinalPageIndexTest, normal) {
     }
     ColumnIndexMetaPB index_meta;
     {
-        std::unique_ptr<fs::WritableBlock> wblock;
-        fs::CreateBlockOptions opts(filename);
-        std::string storage_name;
-        EXPECT_TRUE(fs::fs_util::block_manager(storage_name)->create_block(opts, &wblock).ok());
+        io::FileWriterPtr file_writer;
+        EXPECT_TRUE(fs->create_file(filename, &file_writer).ok());
 
-        EXPECT_TRUE(builder.finish(wblock.get(), &index_meta).ok());
+        EXPECT_TRUE(builder.finish(file_writer.get(), &index_meta).ok());
         EXPECT_EQ(ORDINAL_INDEX, index_meta.type());
         EXPECT_FALSE(index_meta.ordinal_index().root_page().is_root_data_page());
-        EXPECT_TRUE(wblock->close().ok());
+        EXPECT_TRUE(file_writer->close().ok());
         LOG(INFO) << "index page size="
                   << index_meta.ordinal_index().root_page().root_page().size();
     }
 
-    FilePathDesc path_desc(filename);
-    OrdinalIndexReader index(path_desc, &index_meta.ordinal_index(), 16 * 1024 * 4096 + 1);
-    EXPECT_TRUE(index.load(true, false).ok());
+    io::FileReaderSPtr file_reader;
+    EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+    OrdinalIndexReader index(file_reader, 16 * 1024 * 4096 + 1, index_meta.ordinal_index());
+    EXPECT_TRUE(index.load(true, false, nullptr).ok());
     EXPECT_EQ(16 * 1024, index.num_data_pages());
     EXPECT_EQ(1, index.get_first_ordinal(0));
     EXPECT_EQ(4096, index.get_last_ordinal(0));
@@ -129,9 +127,8 @@ TEST_F(OrdinalPageIndexTest, one_data_page) {
         EXPECT_EQ(data_page_pointer, root_page_pointer);
     }
 
-    FilePathDesc path_desc;
-    OrdinalIndexReader index(path_desc, &index_meta.ordinal_index(), num_values);
-    EXPECT_TRUE(index.load(true, false).ok());
+    OrdinalIndexReader index(nullptr, num_values, index_meta.ordinal_index());
+    EXPECT_TRUE(index.load(true, false, nullptr).ok());
     EXPECT_EQ(1, index.num_data_pages());
     EXPECT_EQ(0, index.get_first_ordinal(0));
     EXPECT_EQ(num_values - 1, index.get_last_ordinal(0));

@@ -26,8 +26,8 @@ import org.apache.doris.meta.MetaContext;
 import org.apache.doris.qe.QeService;
 import org.apache.doris.service.ExecuteEnv;
 
-import com.clearspring.analytics.util.Lists;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 import com.sleepycat.bind.tuple.TupleBinding;
 import com.sleepycat.je.Cursor;
 import com.sleepycat.je.Database;
@@ -38,7 +38,6 @@ import com.sleepycat.je.Environment;
 import com.sleepycat.je.EnvironmentConfig;
 import com.sleepycat.je.LockMode;
 import com.sleepycat.je.OperationStatus;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -57,6 +56,7 @@ import java.util.List;
  */
 public class BDBDebugger {
     private static final Logger LOG = LogManager.getLogger(BDBDebugger.class);
+    private BDBDebugEnv debugEnv;
 
     private static class SingletonHolder {
         private static final BDBDebugger INSTANCE = new BDBDebugger();
@@ -66,12 +66,13 @@ public class BDBDebugger {
         return SingletonHolder.INSTANCE;
     }
 
-    private BDBDebugEnv debugEnv;
-
-    public void startDebugMode(String dorisHomeDir) {
+    /**
+     * Start in BDB Debug mode.
+     */
+    public void startDebugMode(String bdbHome) {
         try {
-            initDebugEnv();
-            startService(dorisHomeDir);
+            initDebugEnv(bdbHome);
+            startService();
             while (true) {
                 Thread.sleep(2000);
             }
@@ -81,8 +82,13 @@ public class BDBDebugger {
         }
     }
 
+    private void initDebugEnv(String bdbHome) throws BDBDebugException {
+        debugEnv = new BDBDebugEnv(bdbHome);
+        debugEnv.init();
+    }
+
     // Only start MySQL and HttpServer
-    private void startService(String dorisHomeDir) throws Exception {
+    private void startService() throws Exception {
         // HTTP server
 
         HttpServer httpServer = new HttpServer();
@@ -90,19 +96,19 @@ public class BDBDebugger {
         httpServer.start();
 
         // MySQl server
-        QeService qeService = new QeService(Config.query_port, Config.mysql_service_nio_enabled, ExecuteEnv.getInstance().getScheduler());
+        QeService qeService = new QeService(Config.query_port, Config.arrow_flight_sql_port,
+                                            ExecuteEnv.getInstance().getScheduler());
         qeService.start();
 
         ThreadPoolManager.registerAllThreadPoolMetric();
     }
 
-    private void initDebugEnv() throws BDBDebugException {
-        debugEnv = new BDBDebugEnv(Config.meta_dir + "/bdb/");
-        debugEnv.init();
+    public BDBDebugEnv getEnv() {
+        return debugEnv;
     }
 
     /**
-     * A wrapper class of the BDBJE environment, used to obtain information in bdbje
+     * A wrapper class of the BDBJE environment, used to obtain information in bdbje.
      */
     public static class BDBDebugEnv {
         // the dir of bdbje data dir
@@ -138,10 +144,14 @@ public class BDBDebugger {
             dbConfig.setAllowCreate(false);
             dbConfig.setReadOnly(true);
             Database db = env.openDatabase(null, dbName, dbConfig);
-            return db.count();
+            long journalNumber = db.count();
+            db.close();
+            return journalNumber;
         }
 
-        // get list of journal id (key) in specified database
+        /**
+         * get list of journal id (key) in specified database.
+         */
         public List<Long> getJournalIds(String dbName) throws BDBDebugException {
             DatabaseConfig dbConfig = new DatabaseConfig();
             dbConfig.setAllowCreate(false);
@@ -164,6 +174,8 @@ public class BDBDebugger {
                     Long id = idBinding.entryToObject(key);
                     journalIds.add(id);
                 }
+                cursor.close();
+                db.close();
             } catch (Exception e) {
                 LOG.warn("failed to get journal ids of {}", dbName, e);
                 throw new BDBDebugException("failed to get journal ids of database " + dbName, e);
@@ -171,7 +183,9 @@ public class BDBDebugger {
             return journalIds;
         }
 
-        // get the journal entity of the specified journal id.
+        /**
+         * get the journal entity of the specified journal id.
+         */
         public JournalEntityWrapper getJournalEntity(String dbName, Long journalId) {
             // meta version
             // TODO(cmy): currently the journal data will be read with VERSION_CURRENT
@@ -195,8 +209,10 @@ public class BDBDebugger {
 
             // get the journal
             OperationStatus status = db.get(null, key, value, LockMode.READ_COMMITTED);
+            db.close();
             if (status == OperationStatus.SUCCESS) {
                 byte[] retData = value.getData();
+                entityWrapper.size = retData.length;
                 DataInputStream in = new DataInputStream(new ByteArrayInputStream(retData));
                 JournalEntity entity = new JournalEntity();
                 try {
@@ -213,10 +229,19 @@ public class BDBDebugger {
             MetaContext.remove();
             return entityWrapper;
         }
+
+        public void close() {
+            try {
+                env.close();
+            } catch (Exception e) {
+                LOG.warn("exception:", e);
+            }
+        }
     }
 
     public static class JournalEntityWrapper {
         public Long journalId;
+        public Integer size;
         public JournalEntity entity;
         public String errMsg;
 
@@ -225,10 +250,9 @@ public class BDBDebugger {
         }
     }
 
-    public BDBDebugEnv getEnv() {
-        return debugEnv;
-    }
-
+    /**
+     * BDBDebugException.
+     */
     public static class BDBDebugException extends Exception {
         public BDBDebugException(String msg) {
             super(msg);

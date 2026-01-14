@@ -21,27 +21,36 @@
 package org.apache.doris.planner;
 
 import org.apache.doris.analysis.Expr;
-import org.apache.doris.analysis.QueryStmt;
+import org.apache.doris.analysis.JoinOperator;
 import org.apache.doris.analysis.SlotDescriptor;
 import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StatementBase;
 import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.common.TreeNode;
+import org.apache.doris.nereids.trees.plans.distribute.NereidsSpecifyInstances;
+import org.apache.doris.nereids.trees.plans.distribute.worker.job.ScanSource;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.thrift.TExplainLevel;
 import org.apache.doris.thrift.TPartitionType;
 import org.apache.doris.thrift.TPlanFragment;
+import org.apache.doris.thrift.TQueryCacheParam;
+import org.apache.doris.thrift.TResultSinkType;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.Lists;
-
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -79,24 +88,30 @@ import java.util.stream.Collectors;
  *   fix that
  */
 public class PlanFragment extends TreeNode<PlanFragment> {
-    private final static Logger LOG = LogManager.getLogger(PlanFragment.class);
+    private static final Logger LOG = LogManager.getLogger(PlanFragment.class);
 
     // id for this plan fragment
     private PlanFragmentId fragmentId;
+    // nereids planner and original planner generate fragments in different order.
+    // This makes nereids fragment id different from that of original planner, and
+    // hence different from that in profile.
+    // in original planner, fragmentSequenceNum is fragmentId, and in nereids planner,
+    // fragmentSequenceNum is the id displayed in profile
+    private int fragmentSequenceNum;
     // private PlanId planId_;
     // private CohortId cohortId_;
 
     // root of plan tree executed by this fragment
     private PlanNode planRoot;
 
-    // exchange node to which this fragment sends its output
+    // exchange node which this fragment sends its output to
     private ExchangeNode destNode;
 
-    // if null, outputs the entire row produced by planRoot
+    // if null, set with the planRoot's output exprs when translate PhysicalPlan. see `translatePlan`
     private ArrayList<Expr> outputExprs;
 
     // created in finalize() or set in setSink()
-    private DataSink sink;
+    protected DataSink sink;
 
     // data source(or sender) of specific partition in the fragment;
     // an UNPARTITIONED fragment is executed on only a single node
@@ -116,10 +131,10 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     // specification of how the output of this fragment is partitioned (i.e., how
     // it's sent to its destination);
     // if the output is UNPARTITIONED, it is being broadcast
-    private DataPartition outputPartition;
+    protected DataPartition outputPartition;
 
     // Whether query statistics is sent with every batch. In order to get the query
-    // statistics correctly when query contains limit, it is necessary to send query 
+    // statistics correctly when query contains limit, it is necessary to send query
     // statistics with every batch, or only in close.
     private boolean transferQueryStatisticsWithEveryBatch;
 
@@ -136,8 +151,19 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     // The runtime filter id that is expected to be used
     private Set<RuntimeFilterId> targetRuntimeFilterIds;
 
+    private int bucketNum;
+
     // has colocate plan node
-    private boolean hasColocatePlanNode = false;
+    protected boolean hasColocatePlanNode = false;
+    protected final Supplier<Boolean> hasBucketShuffleNode;
+
+    private TResultSinkType resultSinkType = TResultSinkType.MYSQL_PROTOCOL;
+
+    public Optional<NereidsSpecifyInstances<ScanSource>> specifyInstances = Optional.empty();
+
+    public TQueryCacheParam queryCacheParam;
+    private int numBackends = 0;
+    private boolean forceSingleInstance = false;
 
     /**
      * C'tor for fragment with specific partition; the output is by default broadcast.
@@ -150,6 +176,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.transferQueryStatisticsWithEveryBatch = false;
         this.builderRuntimeFilterIds = new HashSet<>();
         this.targetRuntimeFilterIds = new HashSet<>();
+        this.hasBucketShuffleNode = buildHasBucketShuffleNode();
         setParallelExecNumIfExists();
         setFragmentInPlanTree(planRoot);
     }
@@ -159,16 +186,48 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.dataPartitionForThrift = partitionForThrift;
     }
 
+    public PlanFragment(PlanFragmentId id, PlanNode root, DataPartition partition,
+            Set<RuntimeFilterId> builderRuntimeFilterIds, Set<RuntimeFilterId> targetRuntimeFilterIds) {
+        this(id, root, partition);
+        this.builderRuntimeFilterIds = new HashSet<>(builderRuntimeFilterIds);
+        this.targetRuntimeFilterIds = new HashSet<>(targetRuntimeFilterIds);
+    }
+
+    private Supplier<Boolean> buildHasBucketShuffleNode() {
+        return Suppliers.memoize(() -> {
+            List<HashJoinNode> hashJoinNodes = getPlanRoot().collectInCurrentFragment(HashJoinNode.class::isInstance);
+            for (HashJoinNode hashJoinNode : hashJoinNodes) {
+                if (hashJoinNode.isBucketShuffle()) {
+                    return true;
+                }
+            }
+            List<SetOperationNode> setOperationNodes
+                    = getPlanRoot().collectInCurrentFragment(SetOperationNode.class::isInstance);
+            for (SetOperationNode setOperationNode : setOperationNodes) {
+                if (setOperationNode.isBucketShuffle()) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+
     /**
      * Assigns 'this' as fragment of all PlanNodes in the plan tree rooted at node.
      * Does not traverse the children of ExchangeNodes because those must belong to a
      * different fragment.
      */
     public void setFragmentInPlanTree(PlanNode node) {
-        if (node == null) return;
+        if (node == null) {
+            return;
+        }
         node.setFragment(this);
-        if (node instanceof ExchangeNode) return;
-        for (PlanNode child : node.getChildren()) setFragmentInPlanTree(child);
+        if (node instanceof ExchangeNode) {
+            return;
+        }
+        for (PlanNode child : node.getChildren()) {
+            setFragmentInPlanTree(child);
+        }
     }
 
     /**
@@ -215,6 +274,14 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.hasColocatePlanNode = hasColocatePlanNode;
     }
 
+    public boolean hasBucketShuffleNode() {
+        return hasBucketShuffleNode.get();
+    }
+
+    public void setResultSinkType(TResultSinkType resultSinkType) {
+        this.resultSinkType = resultSinkType;
+    }
+
     public boolean hasColocatePlanNode() {
         return hasColocatePlanNode;
     }
@@ -222,7 +289,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     /**
      * Finalize plan tree and create stream sink, if needed.
      */
-    public void finalize(QueryStmt queryStmt) {
+    public void finalize(StatementBase stmtBase) {
         if (sink != null) {
             return;
         }
@@ -230,7 +297,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
             Preconditions.checkState(sink == null);
             // we're streaming to an exchange node
             DataStreamSink streamSink = new DataStreamSink(destNode.getId());
-            streamSink.setPartition(outputPartition);
+            streamSink.setOutputPartition(outputPartition);
             streamSink.setFragment(this);
             sink = streamSink;
         } else {
@@ -240,13 +307,7 @@ public class PlanFragment extends TreeNode<PlanFragment> {
                 return;
             }
             Preconditions.checkState(sink == null);
-            if (queryStmt != null && queryStmt.hasOutFileClause()) {
-                sink = new ResultFileSink(planRoot.getId(), queryStmt.getOutFileClause(), queryStmt.getColLabels());
-            } else {
-                // add ResultSink
-                // we're streaming to an result sink
-                sink = new ResultSink(planRoot.getId());
-            }
+            sink = new ResultSink(planRoot.getId(), resultSinkType);
         }
     }
 
@@ -259,6 +320,9 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     }
 
     public int getParallelExecNum() {
+        if (forceSingleInstance) {
+            return 1;
+        }
         return parallelExecNum;
     }
 
@@ -288,13 +352,21 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     public String getExplainString(TExplainLevel explainLevel) {
         StringBuilder str = new StringBuilder();
         Preconditions.checkState(dataPartition != null);
-        str.append(" OUTPUT EXPRS:");
         if (CollectionUtils.isNotEmpty(outputExprs)) {
-            str.append(outputExprs.stream().map(Expr::toSql)
-                    .collect(Collectors.joining(" | ")));
+            str.append("  OUTPUT EXPRS:\n    ");
+            str.append(outputExprs.stream().map(Expr::toSql).collect(Collectors.joining("\n    ")));
         }
         str.append("\n");
         str.append("  PARTITION: " + dataPartition.getExplainString(explainLevel) + "\n");
+        str.append("  HAS_COLO_PLAN_NODE: " + hasColocatePlanNode + "\n");
+        if (queryCacheParam != null) {
+            str.append("\n");
+            str.append("  QUERY_CACHE:\n");
+            str.append("    CACHE_NODE_ID: " + queryCacheParam.getNodeId() + "\n");
+            str.append("    DIGEST: " + Hex.encodeHexString(queryCacheParam.getDigest()) + "\n");
+        }
+
+        str.append("\n");
         if (sink != null) {
             str.append(sink.getExplainString("  ", explainLevel) + "\n");
         }
@@ -302,6 +374,13 @@ public class PlanFragment extends TreeNode<PlanFragment> {
             str.append(planRoot.getExplainString("  ", "  ", explainLevel));
         }
         return str.toString();
+    }
+
+    public void getExplainStringMap(Map<Integer, String> planNodeMap) {
+        org.apache.doris.thrift.TExplainLevel explainLevel = org.apache.doris.thrift.TExplainLevel.NORMAL;
+        if (planRoot != null) {
+            planRoot.getExplainStringMap(explainLevel, planNodeMap);
+        }
     }
 
     /**
@@ -318,10 +397,30 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.dataPartition = dataPartition;
     }
 
-    public PlanFragmentId getId() { return fragmentId; }
+    public PlanFragmentId getId() {
+        return fragmentId;
+    }
+
+    public ExchangeNode getDestNode() {
+        return destNode;
+    }
+
+    public PlanNode getDeepestLinearSource() {
+        if (getChildren().size() > 1) {
+            throw new IllegalStateException("getDeepestLinearSource() called on a fragment with multiple children");
+        } else if (getChildren().isEmpty()) {
+            // this is the root fragment
+            return getPlanRoot();
+        } else {
+            // this is a non-root fragment
+            return getChild(0).getDeepestLinearSource();
+        }
+    }
 
     public PlanFragment getDestFragment() {
-        if (destNode == null) return null;
+        if (destNode == null) {
+            return null;
+        }
         return destNode.getFragment();
     }
 
@@ -375,11 +474,6 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.sink = sink;
     }
 
-    public void resetSink(DataSink sink) {
-        sink.setFragment(this);
-        this.sink = sink;
-    }
-
     public PlanFragmentId getFragmentId() {
         return fragmentId;
     }
@@ -392,16 +486,53 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         return targetRuntimeFilterIds;
     }
 
-    public void clearRuntimeFilters() {
-        builderRuntimeFilterIds.clear();
-        targetRuntimeFilterIds.clear();
-    }
-
     public void setTransferQueryStatisticsWithEveryBatch(boolean value) {
         transferQueryStatisticsWithEveryBatch = value;
     }
 
     public boolean isTransferQueryStatisticsWithEveryBatch() {
         return transferQueryStatisticsWithEveryBatch;
+    }
+
+    public int getFragmentSequenceNum() {
+        return fragmentSequenceNum;
+    }
+
+    public void setFragmentSequenceNum(int seq) {
+        fragmentSequenceNum = seq;
+    }
+
+    public int getBucketNum() {
+        return bucketNum;
+    }
+
+    public void setBucketNum(int bucketNum) {
+        this.bucketNum = bucketNum;
+    }
+
+    public boolean hasNullAwareLeftAntiJoin() {
+        return planRoot.anyMatch(plan -> plan instanceof JoinNodeBase
+                && ((JoinNodeBase) plan).getJoinOp() == JoinOperator.NULL_AWARE_LEFT_ANTI_JOIN);
+    }
+
+    public boolean useSerialSource(ConnectContext context) {
+        return context != null
+                && context.getSessionVariable().isIgnoreStorageDataDistribution()
+                && queryCacheParam == null
+                && !hasNullAwareLeftAntiJoin()
+                // If planRoot is not a serial operator and has serial children, we can use serial source and improve
+                // parallelism of non-serial operators.
+                // For bucket shuffle / colocate join fragment, always use serial source if the bucket scan nodes are
+                // serial.
+                && (hasSerialScanNode() || (sink instanceof DataStreamSink && !planRoot.isSerialOperator()
+                && planRoot.hasSerialChildren()));
+    }
+
+    public boolean hasSerialScanNode() {
+        return planRoot.hasSerialScanChildren();
+    }
+
+    public void setForceSingleInstance() {
+        this.forceSingleInstance = true;
     }
 }

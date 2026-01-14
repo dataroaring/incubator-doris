@@ -17,12 +17,13 @@
 
 package org.apache.doris.common.proc;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.qe.QeProcessorImpl;
 import org.apache.doris.qe.QueryStatisticsItem;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -32,7 +33,7 @@ import java.util.Map;
  */
 public class CurrentQueryStatementsProcNode implements ProcNodeInterface {
     public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
-            .add("QueryId").add("ConnectionId").add("Database").add("User")
+            .add("QueryId").add("ConnectionId").add("Catalog").add("Database").add("User")
             .add("ExecTime").add("SqlHash").add("Statement").build();
 
     private static final int EXEC_TIME_INDEX = 5;
@@ -45,13 +46,11 @@ public class CurrentQueryStatementsProcNode implements ProcNodeInterface {
         result.setNames(TITLE_NAMES.asList());
         final List<List<String>> sortedRowData = Lists.newArrayList();
 
-        final CurrentQueryInfoProvider provider = new CurrentQueryInfoProvider();
-        final Map<String, CurrentQueryInfoProvider.QueryStatistics> statisticsMap
-                = provider.getQueryStatistics(statistic.values());
         for (QueryStatisticsItem item : statistic.values()) {
             final List<String> values = Lists.newArrayList();
             values.add(item.getQueryId());
             values.add(item.getConnId());
+            values.add(item.getCatalog());
             values.add(item.getDb());
             values.add(item.getUser());
             values.add(item.getQueryExecTime());
@@ -62,9 +61,9 @@ public class CurrentQueryStatementsProcNode implements ProcNodeInterface {
 
         // sort according to ExecTime
         sortedRowData.sort((l1, l2) -> {
-            final int execTime1 = Integer.parseInt(l1.get(EXEC_TIME_INDEX));
-            final int execTime2 = Integer.parseInt(l2.get(EXEC_TIME_INDEX));
-            return execTime2 - execTime1;
+            final long execTime1 = Long.parseLong(l1.get(EXEC_TIME_INDEX));
+            final long execTime2 = Long.parseLong(l2.get(EXEC_TIME_INDEX));
+            return Long.compare(execTime2, execTime1);
         });
         result.setRows(sortedRowData);
         return result;

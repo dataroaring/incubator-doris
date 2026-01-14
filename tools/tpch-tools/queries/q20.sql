@@ -34,7 +34,7 @@ where
                 from
                     part
                 where
-                    p_name like 'forest%'
+                        p_name like 'forest%'
             )
             and ps_availqty > (
                 select

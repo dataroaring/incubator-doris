@@ -30,7 +30,6 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Table;
 import com.google.gson.annotations.SerializedName;
-
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
@@ -47,22 +46,24 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /*
  * This unit test provides examples about how to make a class serializable.
- * 
+ *
  *    "OrigClassA" is a class includes user-defined class "InnerClassA".
  *    And "InnerClassA" includes some collections which contain another user-defined class "InnerClassB".
- *    
+ *
  *    And there are 2 other classes "OriginClassADifferentMembers" and "OriginClassADifferentMemberName".
  *    "OriginClassADifferentMembers" shows how to add/remove members of a serializable class.
  *    "OriginClassADifferentMemberName" shows how to modify members' name of a serializable class.
- *    
+ *
  *    Every fields which need to be serialized should be with annotation @SerializedName.
  *    @SerializedName has 2 attributes:
  *      1. value(required): the name of this field in Json string.
  *      2. alternate(optional): if we want to use new name for a field and its value in annotation, use alternate.
- *    
+ *
  */
 public class GsonSerializationTest {
     private static String fileName = "./GsonSerializationTest";
@@ -109,10 +110,10 @@ public class GsonSerializationTest {
         public InnerClassA(int flag) {
             list1.add("string1");
             list1.add("string2");
-            
+
             map1.put(1L, "value1");
             map1.put(2L, "value2");
-            
+
             map2.put(1, new InnerClassB(1));
             map2.put(2, new InnerClassB(2));
 
@@ -153,7 +154,7 @@ public class GsonSerializationTest {
 
             this.hashBasedTable.put(1L, "col1", 1L);
             this.hashBasedTable.put(2L, "col2", 2L);
-            
+
             this.arrayListMultimap.put(1L, "value1");
             this.arrayListMultimap.put(1L, "value2");
 
@@ -208,7 +209,7 @@ public class GsonSerializationTest {
         @SerializedName(value = "classA1")
         public InnerClassA classA1ChangeName;
         public InnerClassA ignoreClassA2ChangeName;
-        @SerializedName(value = "flagChangeName", alternate = { "flag" })
+        @SerializedName(value = "flagChangeName", alternate = {"flag"})
         public int flagChangeName = 0;
 
         public OriginClassADifferentMemberName(int flag) {
@@ -230,7 +231,7 @@ public class GsonSerializationTest {
             return GsonUtils.GSON.fromJson(json, OriginClassADifferentMemberName.class);
         }
     }
-    
+
     @After
     public void tearDown() {
         File file = new File(fileName);
@@ -273,7 +274,7 @@ public class GsonSerializationTest {
         Assert.assertEquals(0, readClassA.classA1.map2.get(1).ignoreField);
         Assert.assertEquals(0, readClassA.classA1.map2.get(2).ignoreField);
         Assert.assertEquals(Sets.newHashSet("set1", "set2"), readClassA.classA1.set1);
-        
+
         Table<Long, String, Long> hashBasedTable = readClassA.classA1.map2.get(1).hashBasedTable;
         Assert.assertEquals("HashBasedTable", hashBasedTable.getClass().getSimpleName());
         Multimap<Long, String> hashMultimap = readClassA.classA1.map2.get(1).hashMultimap;
@@ -429,5 +430,76 @@ public class GsonSerializationTest {
         MultiMapClassA readClassA = MultiMapClassA.read(in);
         Assert.assertEquals(Sets.newHashSet(new Key(MyEnum.TYPE_A, "key1"), new Key(MyEnum.TYPE_B, "key2")),
                 readClassA.map.keySet());
+    }
+
+    public static class ConcurrentMapClassA implements Writable {
+        @SerializedName(value = "map1")
+        public ConcurrentMap<Key, Long> map1 = Maps.newConcurrentMap();
+        @SerializedName(value = "map2")
+        public ConcurrentHashMap<Key, Long> map2 = new ConcurrentHashMap<>();
+        @SerializedName(value = "map3")
+        public ConcurrentMap<String, ConcurrentMap<String, Long>> map3 = Maps.newConcurrentMap();
+        @SerializedName(value = "map4")
+        public ConcurrentMap<String, Map<String, Long>> map4 = Maps.newConcurrentMap();
+        @SerializedName(value = "map5")
+        public Map<String, Long> map5 = Maps.newConcurrentMap();
+        @SerializedName(value = "map6")
+        public Map<String, Long> map6 = Maps.newHashMap();
+
+        public ConcurrentMapClassA() {
+            map1.put(new Key(MyEnum.TYPE_A, "key1"), 1L);
+
+            map2.put(new Key(MyEnum.TYPE_B, "key2"), 2L);
+
+            ConcurrentMap map31 = new ConcurrentHashMap<String, Long>();
+            map31.put("a", 1L);
+            map3.put("b", map31);
+
+            Map map41 = new ConcurrentHashMap<String, Long>();
+            map41.put("a", 1L);
+            map4.put("b", map41);
+
+            map5.put("b", 1L);
+
+            map6.put("b", 1L);
+        }
+
+        @Override
+        public void write(DataOutput out) throws IOException {
+            String json = GsonUtils.GSON.toJson(this);
+            Text.writeString(out, json);
+        }
+
+        public static ConcurrentMapClassA read(DataInput in) throws IOException {
+            String json = Text.readString(in);
+            ConcurrentMapClassA classA = GsonUtils.GSON.fromJson(json, ConcurrentMapClassA.class);
+            return classA;
+        }
+    }
+
+    @Test
+    public void testConcurrentMap() throws IOException {
+        // 1. Write objects to file
+        File file = new File(fileName);
+        file.createNewFile();
+        DataOutputStream out = new DataOutputStream(new FileOutputStream(file));
+
+        ConcurrentMapClassA classA = new ConcurrentMapClassA();
+        classA.write(out);
+        out.flush();
+        out.close();
+
+        // 2. Read objects from file
+        DataInputStream in = new DataInputStream(new FileInputStream(file));
+
+        ConcurrentMapClassA readClassA = ConcurrentMapClassA.read(in);
+        Assert.assertTrue(readClassA.map1 instanceof ConcurrentHashMap);
+        Assert.assertTrue(readClassA.map2 instanceof ConcurrentHashMap);
+        Assert.assertTrue(readClassA.map3 instanceof ConcurrentHashMap);
+        Assert.assertTrue(readClassA.map3.get("b") instanceof ConcurrentHashMap);
+        Assert.assertTrue(readClassA.map4 instanceof ConcurrentHashMap);
+        Assert.assertFalse(readClassA.map4.get("b") instanceof ConcurrentHashMap);
+        Assert.assertFalse(readClassA.map5 instanceof ConcurrentHashMap);
+        Assert.assertFalse(readClassA.map6 instanceof ConcurrentHashMap);
     }
 }

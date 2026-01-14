@@ -23,23 +23,17 @@ package org.apache.doris.analysis;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.NotImplementedException;
+import org.apache.doris.common.FormatOptions;
+import org.apache.doris.thrift.TExprNode;
+import org.apache.doris.thrift.TExprNodeType;
 
 import com.google.common.base.Preconditions;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 
 public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr> {
-    private static final Logger LOG = LogManager.getLogger(LiteralExpr.class);
-
     public LiteralExpr() {
-        numDistinctValues = 1;
     }
 
     protected LiteralExpr(LiteralExpr other) {
@@ -70,6 +64,10 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
                 literalExpr = new FloatLiteral(value);
                 break;
             case DECIMALV2:
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
+            case DECIMAL256:
                 literalExpr = new DecimalLiteral(value);
                 break;
             case CHAR:
@@ -77,48 +75,26 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
             case HLL:
             case STRING:
                 literalExpr = new StringLiteral(value);
+                literalExpr.setType(type);
+                break;
+            case JSONB:
+                literalExpr = new JsonLiteral(value);
                 break;
             case DATE:
             case DATETIME:
+            case DATEV2:
+            case DATETIMEV2:
+            case TIMESTAMPTZ:
                 literalExpr = new DateLiteral(value, type);
+                break;
+            case IPV4:
+                literalExpr = new IPv4Literal(value);
+                break;
+            case IPV6:
+                literalExpr = new IPv6Literal(value);
                 break;
             default:
                 throw new AnalysisException("Type[" + type.toSql() + "] not supported.");
-        }
-
-        Preconditions.checkNotNull(literalExpr);
-        return literalExpr;
-    }
-
-    /**
-     * Init LiteralExpr's Type information
-     * only use in rewrite alias function
-     * @param expr
-     * @return
-     * @throws AnalysisException
-     */
-    public static LiteralExpr init(LiteralExpr expr) throws AnalysisException {
-        Preconditions.checkArgument(expr.getType().equals(Type.INVALID));
-        String value = expr.getStringValue();
-        LiteralExpr literalExpr = null;
-        if (expr instanceof NullLiteral) {
-            literalExpr = new NullLiteral();
-        } else if (expr instanceof BoolLiteral) {
-            literalExpr = new BoolLiteral(value);
-        } else if (expr instanceof IntLiteral) {
-            literalExpr = new IntLiteral(Long.parseLong(value));
-        } else if (expr instanceof LargeIntLiteral) {
-            literalExpr = new LargeIntLiteral(value);
-        } else if (expr instanceof FloatLiteral) {
-            literalExpr = new FloatLiteral(value);
-        } else if (expr instanceof DecimalLiteral) {
-            literalExpr = new DecimalLiteral(value);
-        } else if (expr instanceof StringLiteral) {
-            literalExpr = new StringLiteral(value);
-        } else if (expr instanceof DateLiteral) {
-            literalExpr = new DateLiteral(value, expr.getType());
-        } else {
-            throw new AnalysisException("Type[" + expr.getType().toSql() + "] not supported.");
         }
 
         Preconditions.checkNotNull(literalExpr);
@@ -140,15 +116,13 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
                 return LargeIntLiteral.createMinValue();
             case DATE:
             case DATETIME:
+            case DATEV2:
+            case DATETIMEV2:
+            case TIMESTAMPTZ:
                 return DateLiteral.createMinValue(type);
             default:
                 throw new AnalysisException("Invalid data type for creating infinity: " + type);
         }
-    }
-
-    @Override
-    protected void analyzeImpl(Analyzer analyzer) throws AnalysisException {
-        // Literals require no analysis.
     }
 
     /*
@@ -175,8 +149,11 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
     // literal values to the metastore rather than to Palo backends. This is similar to
     // the toSql() method, but does not perform any formatting of the string values. Neither
     // method unescapes string values.
-    public String getStringValue() {
-        return null;
+    @Override
+    public abstract String getStringValue();
+
+    public String getStringValueForQuery(FormatOptions options) {
+        return getStringValue();
     }
 
     public long getLongValue() {
@@ -198,24 +175,6 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
         return buffer;
     }
 
-    // Swaps the sign of numeric literals.
-    // Throws for non-numeric literals.
-    public void swapSign() throws NotImplementedException {
-        throw new NotImplementedException("swapSign() only implemented for numeric" + "literals");
-    }
-
-    @Override
-    public boolean supportSerializable() {
-        return true;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-    }
-
-    public void readFields(DataInput in) throws IOException {
-    }
-    
     @Override
     public boolean equals(Object obj) {
         if (this == obj) {
@@ -235,8 +194,34 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
     }
 
     @Override
-    public boolean isNullable() {
-        return this instanceof NullLiteral;
+    public String toString() {
+        return getStringValue();
     }
-}
 
+    @Override
+    public String getExprName() {
+        if (!this.exprName.isPresent()) {
+            this.exprName = Optional.of("literal");
+        }
+        return this.exprName.get();
+    }
+
+    public static LiteralExpr getLiteralExprFromThrift(TExprNode node) throws AnalysisException {
+        TExprNodeType type = node.node_type;
+        switch (type) {
+            case NULL_LITERAL: return new NullLiteral();
+            case BOOL_LITERAL: return new BoolLiteral(node.bool_literal.value);
+            case INT_LITERAL: return new IntLiteral(node.int_literal.value);
+            case LARGE_INT_LITERAL: return new LargeIntLiteral(node.large_int_literal.value);
+            case FLOAT_LITERAL: return new FloatLiteral(node.float_literal.value);
+            case DECIMAL_LITERAL: return new DecimalLiteral(node.decimal_literal.value);
+            case STRING_LITERAL: return new StringLiteral(node.string_literal.value);
+            case JSON_LITERAL: return new JsonLiteral(node.json_literal.value);
+            case DATE_LITERAL: return new DateLiteral(node.date_literal.value);
+            case IPV4_LITERAL: return new IPv4Literal(node.ipv4_literal.value);
+            case IPV6_LITERAL: return new IPv6Literal(node.ipv6_literal.value);
+            default: throw new AnalysisException("Wrong type from thrift;");
+        }
+    }
+
+}

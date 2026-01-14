@@ -20,11 +20,12 @@ package org.apache.doris.load;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
-import org.apache.doris.load.loadv2.dpp.DppResult;
+import org.apache.doris.sparkdpp.DppResult;
 import org.apache.doris.thrift.TEtlState;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -34,10 +35,15 @@ import java.util.Map.Entry;
 
 public class EtlStatus implements Writable {
     public static final String DEFAULT_TRACKING_URL = FeConstants.null_string;
-    
+    @SerializedName(value = "s")
     private TEtlState state;
+    @SerializedName(value = "tu")
     private String trackingUrl;
+    @SerializedName(value = "fem")
+    private String firstErrorMsg;
+    @SerializedName(value = "st")
     private Map<String, String> stats;
+    @SerializedName(value = "c")
     private Map<String, String> counters;
     // not persist
     private Map<String, Long> fileMap;
@@ -51,6 +57,7 @@ public class EtlStatus implements Writable {
     public EtlStatus() {
         this.state = TEtlState.RUNNING;
         this.trackingUrl = DEFAULT_TRACKING_URL;
+        this.firstErrorMsg = "";
         this.stats = Maps.newHashMap();
         this.counters = Maps.newHashMap();
         this.fileMap = Maps.newHashMap();
@@ -78,6 +85,14 @@ public class EtlStatus implements Writable {
 
     public void setTrackingUrl(String trackingUrl) {
         this.trackingUrl = Strings.nullToEmpty(trackingUrl);
+    }
+
+    public String getFirstErrorMsg() {
+        return firstErrorMsg;
+    }
+
+    public void setFirstErrorMsg(String firstErrorMsg) {
+        this.firstErrorMsg = Strings.nullToEmpty(firstErrorMsg);
     }
 
     public Map<String, String> getStats() {
@@ -147,22 +162,23 @@ public class EtlStatus implements Writable {
 
     @Override
     public String toString() {
-        return "EtlStatus{" +
-                "state=" + state +
-                ", trackingUrl='" + trackingUrl + '\'' +
-                ", stats=" + stats +
-                ", counters=" + counters +
-                ", fileMap=" + fileMap +
-                ", progress=" + progress +
-                ", failMsg='" + failMsg + '\'' +
-                ", dppResult='" + dppResult + '\'' +
-                '}';
+        return "EtlStatus{"
+                + "state=" + state
+                + ", trackingUrl='" + trackingUrl + '\''
+                + ", firstErrorMsg='" + firstErrorMsg + '\''
+                + ", stats=" + stats
+                + ", counters=" + counters
+                + ", fileMap=" + fileMap
+                + ", progress=" + progress
+                + ", failMsg='" + failMsg + '\''
+                + ", dppResult='" + dppResult + '\''
+                + '}';
     }
 
     public void write(DataOutput out) throws IOException {
         Text.writeString(out, state.name());
         Text.writeString(out, trackingUrl);
-        
+
         int statsCount = (stats == null) ? 0 : stats.size();
         out.writeInt(statsCount);
         for (Map.Entry<String, String> entry : stats.entrySet()) {
@@ -177,6 +193,7 @@ public class EtlStatus implements Writable {
             Text.writeString(out, entry.getValue());
         }
     }
+
     public void readFields(DataInput in) throws IOException {
         state = TEtlState.valueOf(Text.readString(in));
         trackingUrl = Text.readString(in);
@@ -195,18 +212,18 @@ public class EtlStatus implements Writable {
             counters.put(key, value);
         }
     }
-    
+
     public boolean equals(Object obj) {
         if (obj == this) {
             return true;
         }
-        
+
         if (!(obj instanceof EtlStatus)) {
             return false;
         }
-        
+
         EtlStatus etlTaskStatus = (EtlStatus) obj;
-        
+
         // Check stats
         if (etlTaskStatus.stats == null) {
             return false;
@@ -223,7 +240,7 @@ public class EtlStatus implements Writable {
                 return false;
             }
         }
-        
+
         // Check counters
         if (etlTaskStatus.counters == null) {
             return false;
@@ -240,7 +257,7 @@ public class EtlStatus implements Writable {
                 return false;
             }
         }
-        
+
         return state.equals(etlTaskStatus.state) && trackingUrl.equals(etlTaskStatus.trackingUrl);
     }
 }

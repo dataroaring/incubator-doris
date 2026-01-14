@@ -15,28 +15,30 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_HTTP_CHECKSUM_ACTION_H
-#define DORIS_BE_SRC_HTTP_CHECKSUM_ACTION_H
+#pragma once
 
 #include <cstdint>
 
-#include "http/http_handler.h"
+#include "http/http_handler_with_auth.h"
 
 namespace doris {
 
-class ExecEnv;
+class HttpRequest;
+class StorageEngine;
 
-class ChecksumAction : public HttpHandler {
+class ChecksumAction final : public HttpHandlerWithAuth {
 public:
-    explicit ChecksumAction();
+    explicit ChecksumAction(ExecEnv* exec_env, StorageEngine& engine, TPrivilegeHier::type hier,
+                            TPrivilegeType::type type);
 
-    virtual ~ChecksumAction() {}
+    ~ChecksumAction() override = default;
 
     void handle(HttpRequest* req) override;
 
 private:
     int64_t do_checksum(int64_t tablet_id, int64_t version, int32_t schema_hash, HttpRequest* req);
+
+    StorageEngine& _engine;
 }; // end class ChecksumAction
 
 } // end namespace doris
-#endif // DORIS_BE_SRC_COMMON_UTIL_DOWNLOAD_ACTION_H

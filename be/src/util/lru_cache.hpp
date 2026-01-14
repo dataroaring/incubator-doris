@@ -15,12 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_UTIL_LRU_CACHE_HPP
-#define DORIS_BE_UTIL_LRU_CACHE_HPP
+#pragma once
 
+#include <iterator>
 #include <list>
 #include <unordered_map>
-#include <iterator>
 
 namespace doris {
 
@@ -30,8 +29,14 @@ public:
     typedef typename std::pair<Key, Value> KeyValuePair;
     typedef typename std::list<KeyValuePair>::iterator ListIterator;
 
-    class Iterator : public std::iterator<std::input_iterator_tag, KeyValuePair> {
+    class Iterator {
     public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = KeyValuePair;
+        using difference_type = ptrdiff_t;
+        using pointer = KeyValuePair*;
+        using reference = KeyValuePair&;
+
         Iterator(typename std::unordered_map<Key, ListIterator>::iterator it) : _it(it) {}
 
         Iterator& operator++() {
@@ -79,7 +84,7 @@ public:
         }
     }
 
-    // Must copy value, because value maybe relased when caller used
+    // Must copy value, because value maybe released when caller used
     bool get(const Key& key, Value* value) {
         auto it = _cache_items_map.find(key);
         if (it == _cache_items_map.end()) {
@@ -107,5 +112,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

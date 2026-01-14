@@ -17,61 +17,152 @@
 
 #pragma once
 
-#include "util/stack_util.h"
+#include <brpc/http_method.h>
+#include <gen_cpp/internal_service.pb.h>
+
+#include "common/config.h"
+#include "common/status.h"
+#include "network_util.h"
+#include "runtime/exec_env.h"
+#include "runtime/runtime_state.h"
+#include "util/brpc_client_cache.h"
 
 namespace doris {
 
-// Transfer RowBatch in ProtoBuf Request to Controller Attachment.
-// This can avoid reaching the upper limit of the ProtoBuf Request length (2G),
-// and it is expected that performance can be improved.
+// When the tuple/block data is greater than 2G, embed the tuple/block data
+// and the request serialization string in the attachment, and use "http" brpc.
+// "http"brpc requires that only one of request and attachment be non-null.
+//
+// 2G: In the default "baidu_std" brpcd, upper limit of the request and attachment length is 2G.
+constexpr size_t MIN_HTTP_BRPC_SIZE = (1ULL << 31);
+
+// Embed column_values and brpc request serialization string in controller attachment.
 template <typename Params, typename Closure>
-inline void request_row_batch_transfer_attachment(Params* brpc_request,
-                                                  const std::string& tuple_data, Closure* closure) {
-    auto row_batch = brpc_request->mutable_row_batch();
-    row_batch->set_tuple_data("");
-    brpc_request->set_transfer_by_attachment(true);
-    butil::IOBuf attachment;
-    attachment.append(tuple_data);
-    closure->cntl.request_attachment().swap(attachment);
+Status request_embed_attachment_contain_blockv2(Params* brpc_request,
+                                                std::unique_ptr<Closure>& closure) {
+    std::string column_values = std::move(*brpc_request->mutable_block()->mutable_column_values());
+    brpc_request->mutable_block()->mutable_column_values()->clear();
+    return request_embed_attachmentv2(brpc_request, column_values, closure);
 }
 
-// Transfer Block in ProtoBuf Request to Controller Attachment.
-// This can avoid reaching the upper limit of the ProtoBuf Request length (2G),
-// and it is expected that performance can be improved.
+inline bool enable_http_send_block(const PTransmitDataParams& request) {
+    if (!config::transfer_large_data_by_brpc) {
+        return false;
+    }
+    if (!request.has_block() || !request.block().has_column_values()) {
+        return false;
+    }
+    if (request.ByteSizeLong() < MIN_HTTP_BRPC_SIZE) {
+        return false;
+    }
+    return true;
+}
+
+template <typename Closure>
+void transmit_blockv2(PBackendService_Stub* stub, std::unique_ptr<Closure> closure) {
+    closure->cntl_->http_request().Clear();
+    stub->transmit_block(closure->cntl_.get(), closure->request_.get(), closure->response_.get(),
+                         closure.get());
+    closure.release();
+}
+
+template <typename Closure>
+Status transmit_block_httpv2(ExecEnv* exec_env, std::unique_ptr<Closure> closure,
+                             TNetworkAddress brpc_dest_addr) {
+    RETURN_IF_ERROR(request_embed_attachment_contain_blockv2(closure->request_.get(), closure));
+
+    std::string host = brpc_dest_addr.hostname;
+    auto dns_cache = ExecEnv::GetInstance()->dns_cache();
+    if (dns_cache == nullptr) {
+        LOG(WARNING) << "DNS cache is not initialized, skipping hostname resolve";
+    } else if (!is_valid_ip(brpc_dest_addr.hostname)) {
+        Status status = dns_cache->get(brpc_dest_addr.hostname, &host);
+        if (!status.ok()) {
+            LOG(WARNING) << "failed to get ip from host " << brpc_dest_addr.hostname << ": "
+                         << status.to_string();
+            return Status::InternalError("failed to get ip from host {}", brpc_dest_addr.hostname);
+        }
+    }
+    //format an ipv6 address
+    std::string brpc_url = get_brpc_http_url(brpc_dest_addr.hostname, brpc_dest_addr.port);
+
+    std::shared_ptr<PBackendService_Stub> brpc_http_stub =
+            exec_env->brpc_internal_client_cache()->get_new_client_no_cache(brpc_url, "http");
+    if (brpc_http_stub == nullptr) {
+        return Status::InternalError("failed to open brpc http client to {}", brpc_url);
+    }
+    closure->cntl_->http_request().uri() =
+            brpc_url + "/PInternalServiceImpl/transmit_block_by_http";
+    closure->cntl_->http_request().set_method(brpc::HTTP_METHOD_POST);
+    closure->cntl_->http_request().set_content_type("application/json");
+    brpc_http_stub->transmit_block_by_http(closure->cntl_.get(), nullptr, closure->response_.get(),
+                                           closure.get());
+    closure.release();
+
+    return Status::OK();
+}
+
 template <typename Params, typename Closure>
-inline void request_block_transfer_attachment(Params* brpc_request,
-                                              const std::string& column_values, Closure* closure) {
+Status request_embed_attachmentv2(Params* brpc_request, const std::string& data,
+                                  std::unique_ptr<Closure>& closure) {
+    butil::IOBuf attachment;
+
+    // step1: serialize brpc_request to string, and append to attachment.
+    std::string req_str;
+    if (!brpc_request->SerializeToString(&req_str)) {
+        return Status::InternalError("failed to serialize the request");
+    }
+    int64_t req_str_size = req_str.size();
+    attachment.append(&req_str_size, sizeof(req_str_size));
+    attachment.append(req_str);
+
+    // step2: append data to attachment and put it in the closure.
+    int64_t data_size = data.size();
+    attachment.append(&data_size, sizeof(data_size));
+    try {
+        attachment.append(data);
+    } catch (...) {
+        LOG(WARNING) << "Try to alloc " << data_size
+                     << " bytes for append data to attachment failed. ";
+        return Status::MemoryAllocFailed("request embed attachment failed to memcpy {} bytes",
+                                         data_size);
+    }
+    // step3: attachment add to closure.
+    closure->cntl_->request_attachment().swap(attachment);
+    return Status::OK();
+}
+
+// Extract the brpc request and block from the controller attachment,
+// and put the block into the request.
+template <typename Params>
+Status attachment_extract_request_contain_block(Params* brpc_request, brpc::Controller* cntl) {
     auto block = brpc_request->mutable_block();
-    block->set_column_values("");
-    brpc_request->set_transfer_by_attachment(true);
-    butil::IOBuf attachment;
-    attachment.append(column_values);
-    closure->cntl.request_attachment().swap(attachment);
+    return attachment_extract_request(brpc_request, cntl, block->mutable_column_values());
 }
 
-// Controller Attachment transferred to RowBatch in ProtoBuf Request.
 template <typename Params>
-inline void attachment_transfer_request_row_batch(const Params* brpc_request,
-                                                  brpc::Controller* cntl) {
-    Params* req = const_cast<Params*>(brpc_request);
-    if (req->has_row_batch() && req->transfer_by_attachment()) {
-        auto rb = req->mutable_row_batch();
-        const butil::IOBuf& io_buf = cntl->request_attachment();
-        CHECK(io_buf.size() > 0) << io_buf.size() << ", row num: " << req->row_batch().num_rows();
-        io_buf.copy_to(rb->mutable_tuple_data(), io_buf.size(), 0);
-    }
-}
+Status attachment_extract_request(Params* brpc_request, brpc::Controller* cntl, std::string* data) {
+    const butil::IOBuf& io_buf = cntl->request_attachment();
 
-// Controller Attachment transferred to Block in ProtoBuf Request.
-template <typename Params>
-inline void attachment_transfer_request_block(const Params* brpc_request, brpc::Controller* cntl) {
-    Params* req = const_cast<Params*>(brpc_request);
-    if (req->has_block() && req->transfer_by_attachment()) {
-        auto block = req->mutable_block();
-        const butil::IOBuf& io_buf = cntl->request_attachment();
-        CHECK(io_buf.size() > 0) << io_buf.size();
-        io_buf.copy_to(block->mutable_column_values(), io_buf.size(), 0);
+    // step1: deserialize request string to brpc_request from attachment.
+    int64_t req_str_size;
+    io_buf.copy_to(&req_str_size, sizeof(req_str_size), 0);
+    std::string req_str;
+    io_buf.copy_to(&req_str, req_str_size, sizeof(req_str_size));
+    brpc_request->ParseFromString(req_str);
+
+    // step2: extract data from attachment.
+    int64_t data_size;
+    io_buf.copy_to(&data_size, sizeof(data_size), sizeof(req_str_size) + req_str_size);
+    try {
+        io_buf.copy_to(data, data_size, sizeof(data_size) + sizeof(req_str_size) + req_str_size);
+    } catch (...) {
+        LOG(WARNING) << "Try to alloc " << data_size
+                     << " bytes for extract data from attachment failed. ";
+        return Status::MemoryAllocFailed("attachment extract request failed to memcpy {} bytes",
+                                         data_size);
     }
+    return Status::OK();
 }
 
 } // namespace doris

@@ -19,14 +19,16 @@ package org.apache.doris.backup;
 
 import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.catalog.AggregateType;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.DataProperty;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.DistributionInfo;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.FakeEditLog;
 import org.apache.doris.catalog.HashDistributionInfo;
 import org.apache.doris.catalog.KeysType;
+import org.apache.doris.catalog.LocalReplica;
+import org.apache.doris.catalog.LocalTablet;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexState;
 import org.apache.doris.catalog.MysqlTable;
@@ -50,8 +52,9 @@ import org.apache.doris.common.DdlException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.common.util.Util;
-import org.apache.doris.load.Load;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
+import org.apache.doris.mysql.privilege.Auth;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.qe.ConnectContext;
@@ -62,11 +65,10 @@ import org.apache.doris.thrift.TStorageType;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
+import mockit.Expectations;
 
 import java.util.List;
 import java.util.Map;
-
-import mockit.Expectations;
 
 public class CatalogMocker {
     // user
@@ -83,7 +85,7 @@ public class CatalogMocker {
     // db
     public static final String TEST_DB_NAME = "test_db";
     public static final long TEST_DB_ID = 20000;
-    
+
     // single partition olap table
     public static final String TEST_TBL_NAME = "test_tbl";
     public static final long TEST_TBL_ID = 30000;
@@ -104,7 +106,7 @@ public class CatalogMocker {
     public static final String MYSQL_PWD = "mysql-pwd";
     public static final String MYSQL_DB = "mysql-db";
     public static final String MYSQL_TBL = "mysql-tbl";
-    
+
     // partition olap table with a rollup
     public static final String TEST_TBL2_NAME = "test_tbl2";
     public static final long TEST_TBL2_ID = 30002;
@@ -154,7 +156,7 @@ public class CatalogMocker {
         Column k5 = new Column("k5", ScalarType.createType(PrimitiveType.LARGEINT), true, null, "", "key5");
         Column k6 = new Column("k6", ScalarType.createType(PrimitiveType.DATE), true, null, "", "key6");
         Column k7 = new Column("k7", ScalarType.createType(PrimitiveType.DATETIME), true, null, "", "key7");
-        Column k8 = new Column("k8", ScalarType.createDecimalV2Type(10, 3), true, null, "", "key8");
+        Column k8 = new Column("k8", ScalarType.createDecimalType(10, 3), true, null, "", "key8");
         k1.setIsKey(true);
         k2.setIsKey(true);
         k3.setIsKey(true);
@@ -204,24 +206,24 @@ public class CatalogMocker {
         ROLLUP_SCHEMA_HASH = Util.generateSchemaHash();
     }
 
-    private static PaloAuth fetchAdminAccess() {
-        PaloAuth auth = new PaloAuth();
-        new Expectations(auth) {
+    private static AccessControllerManager fetchAdminAccess() {
+        AccessControllerManager accessManager = new AccessControllerManager(new Auth());
+        new Expectations(accessManager) {
             {
-                auth.checkGlobalPriv((ConnectContext) any, (PrivPredicate) any);
+                accessManager.checkGlobalPriv((ConnectContext) any, (PrivPredicate) any);
                 minTimes = 0;
                 result = true;
 
-                auth.checkDbPriv((ConnectContext) any, anyString, (PrivPredicate) any);
+                accessManager.checkDbPriv((ConnectContext) any, anyString, anyString, (PrivPredicate) any);
                 minTimes = 0;
                 result = true;
 
-                auth.checkTblPriv((ConnectContext) any, anyString, anyString, (PrivPredicate) any);
+                accessManager.checkTblPriv((ConnectContext) any, anyString, anyString, anyString, (PrivPredicate) any);
                 minTimes = 0;
                 result = true;
             }
         };
-        return auth;
+        return accessManager;
     }
 
     public static SystemInfoService fetchSystemInfoService() {
@@ -247,13 +249,13 @@ public class CatalogMocker {
                                             KeysType.AGG_KEYS, partitionInfo, distributionInfo);
         Deencapsulation.setField(olapTable, "baseIndexId", TEST_TBL_ID);
 
-        Tablet tablet0 = new Tablet(TEST_TABLET0_ID);
+        Tablet tablet0 = new LocalTablet(TEST_TABLET0_ID);
         TabletMeta tabletMeta = new TabletMeta(TEST_DB_ID, TEST_TBL_ID, TEST_SINGLE_PARTITION_ID,
                                                TEST_TBL_ID, SCHEMA_HASH, TStorageMedium.HDD);
         baseIndex.addTablet(tablet0, tabletMeta);
-        Replica replica0 = new Replica(TEST_REPLICA0_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
-        Replica replica1 = new Replica(TEST_REPLICA1_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
-        Replica replica2 = new Replica(TEST_REPLICA2_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
+        Replica replica0 = new LocalReplica(TEST_REPLICA0_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
+        Replica replica1 = new LocalReplica(TEST_REPLICA1_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
+        Replica replica2 = new LocalReplica(TEST_REPLICA2_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
 
         tablet0.addReplica(replica0);
         tablet0.addReplica(replica1);
@@ -262,7 +264,7 @@ public class CatalogMocker {
         olapTable.setIndexMeta(TEST_TBL_ID, TEST_TBL_NAME, TEST_TBL_BASE_SCHEMA, 0, SCHEMA_HASH, (short) 1,
                 TStorageType.COLUMN, KeysType.AGG_KEYS);
         olapTable.addPartition(partition);
-        db.createTable(olapTable);
+        db.registerTable(olapTable);
 
         // 2. mysql table
         Map<String, String> mysqlProp = Maps.newHashMap();
@@ -278,7 +280,7 @@ public class CatalogMocker {
         } catch (DdlException e) {
             e.printStackTrace();
         }
-        db.createTable(mysqlTable);
+        db.registerTable(mysqlTable);
 
         // 3. range partition olap table
         MaterializedIndex baseIndexP1 = new MaterializedIndex(TEST_TBL2_ID, IndexState.NORMAL);
@@ -290,7 +292,7 @@ public class CatalogMocker {
         Partition partition2 =
                 new Partition(TEST_PARTITION2_ID, TEST_PARTITION2_NAME, baseIndexP2, distributionInfo2);
         RangePartitionInfo rangePartitionInfo = new RangePartitionInfo(Lists.newArrayList(TEST_TBL_BASE_SCHEMA.get(0)));
-        
+
         PartitionKey rangeP1Lower =
                 PartitionKey.createInfinityPartitionKey(Lists.newArrayList(TEST_TBL_BASE_SCHEMA.get(0)), false);
         PartitionKey rangeP1Upper =
@@ -321,25 +323,25 @@ public class CatalogMocker {
                 KeysType.AGG_KEYS, rangePartitionInfo, distributionInfo2);
         Deencapsulation.setField(olapTable2, "baseIndexId", TEST_TBL2_ID);
 
-        Tablet baseTabletP1 = new Tablet(TEST_BASE_TABLET_P1_ID);
+        Tablet baseTabletP1 = new LocalTablet(TEST_BASE_TABLET_P1_ID);
         TabletMeta tabletMetaBaseTabletP1 = new TabletMeta(TEST_DB_ID, TEST_TBL2_ID, TEST_PARTITION1_ID,
                                                            TEST_TBL2_ID, SCHEMA_HASH, TStorageMedium.HDD);
         baseIndexP1.addTablet(baseTabletP1, tabletMetaBaseTabletP1);
-        Replica replica3 = new Replica(TEST_REPLICA3_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
-        Replica replica4 = new Replica(TEST_REPLICA4_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
-        Replica replica5 = new Replica(TEST_REPLICA5_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
+        Replica replica3 = new LocalReplica(TEST_REPLICA3_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
+        Replica replica4 = new LocalReplica(TEST_REPLICA4_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
+        Replica replica5 = new LocalReplica(TEST_REPLICA5_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
 
         baseTabletP1.addReplica(replica3);
         baseTabletP1.addReplica(replica4);
         baseTabletP1.addReplica(replica5);
 
-        Tablet baseTabletP2 = new Tablet(TEST_BASE_TABLET_P2_ID);
+        Tablet baseTabletP2 = new LocalTablet(TEST_BASE_TABLET_P2_ID);
         TabletMeta tabletMetaBaseTabletP2 = new TabletMeta(TEST_DB_ID, TEST_TBL2_ID, TEST_PARTITION2_ID,
                                                            TEST_TBL2_ID, SCHEMA_HASH, TStorageMedium.HDD);
         baseIndexP2.addTablet(baseTabletP2, tabletMetaBaseTabletP2);
-        Replica replica6 = new Replica(TEST_REPLICA6_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
-        Replica replica7 = new Replica(TEST_REPLICA7_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
-        Replica replica8 = new Replica(TEST_REPLICA8_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
+        Replica replica6 = new LocalReplica(TEST_REPLICA6_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
+        Replica replica7 = new LocalReplica(TEST_REPLICA7_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
+        Replica replica8 = new LocalReplica(TEST_REPLICA8_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
 
         baseTabletP2.addReplica(replica6);
         baseTabletP2.addReplica(replica7);
@@ -353,31 +355,31 @@ public class CatalogMocker {
 
         // rollup index p1
         MaterializedIndex rollupIndexP1 = new MaterializedIndex(TEST_ROLLUP_ID, IndexState.NORMAL);
-        Tablet rollupTabletP1 = new Tablet(TEST_ROLLUP_TABLET_P1_ID);
+        Tablet rollupTabletP1 = new LocalTablet(TEST_ROLLUP_TABLET_P1_ID);
         TabletMeta tabletMetaRollupTabletP1 = new TabletMeta(TEST_DB_ID, TEST_TBL2_ID, TEST_PARTITION1_ID,
                                                              TEST_ROLLUP_TABLET_P1_ID, ROLLUP_SCHEMA_HASH,
                                                              TStorageMedium.HDD);
         rollupIndexP1.addTablet(rollupTabletP1, tabletMetaRollupTabletP1);
-        Replica replica9 = new Replica(TEST_REPLICA9_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
-        Replica replica10 = new Replica(TEST_REPLICA10_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
-        Replica replica11 = new Replica(TEST_REPLICA11_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
-        
+        Replica replica9 = new LocalReplica(TEST_REPLICA9_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
+        Replica replica10 = new LocalReplica(TEST_REPLICA10_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
+        Replica replica11 = new LocalReplica(TEST_REPLICA11_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
+
         rollupTabletP1.addReplica(replica9);
         rollupTabletP1.addReplica(replica10);
         rollupTabletP1.addReplica(replica11);
-        
+
         partition1.createRollupIndex(rollupIndexP1);
 
         // rollup index p2
         MaterializedIndex rollupIndexP2 = new MaterializedIndex(TEST_ROLLUP_ID, IndexState.NORMAL);
-        Tablet rollupTabletP2 = new Tablet(TEST_ROLLUP_TABLET_P2_ID);
+        Tablet rollupTabletP2 = new LocalTablet(TEST_ROLLUP_TABLET_P2_ID);
         TabletMeta tabletMetaRollupTabletP2 = new TabletMeta(TEST_DB_ID, TEST_TBL2_ID, TEST_PARTITION1_ID,
                                                              TEST_ROLLUP_TABLET_P2_ID, ROLLUP_SCHEMA_HASH,
                                                              TStorageMedium.HDD);
         rollupIndexP2.addTablet(rollupTabletP2, tabletMetaRollupTabletP2);
-        Replica replica12 = new Replica(TEST_REPLICA12_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
-        Replica replica13 = new Replica(TEST_REPLICA13_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
-        Replica replica14 = new Replica(TEST_REPLICA14_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
+        Replica replica12 = new LocalReplica(TEST_REPLICA12_ID, BACKEND1_ID, 0, ReplicaState.NORMAL);
+        Replica replica13 = new LocalReplica(TEST_REPLICA13_ID, BACKEND2_ID, 0, ReplicaState.NORMAL);
+        Replica replica14 = new LocalReplica(TEST_REPLICA14_ID, BACKEND3_ID, 0, ReplicaState.NORMAL);
         rollupTabletP2.addReplica(replica12);
         rollupTabletP2.addReplica(replica13);
         rollupTabletP2.addReplica(replica14);
@@ -386,25 +388,34 @@ public class CatalogMocker {
 
         olapTable2.setIndexMeta(TEST_ROLLUP_ID, TEST_ROLLUP_NAME, TEST_ROLLUP_SCHEMA, 0, ROLLUP_SCHEMA_HASH,
                                       (short) 1, TStorageType.COLUMN, KeysType.AGG_KEYS);
-        db.createTable(olapTable2);
+        db.registerTable(olapTable2);
 
         return db;
     }
 
-    public static Catalog fetchAdminCatalog() {
+    public static Env fetchAdminCatalog() {
         try {
-            FakeEditLog fakeEditLog = new FakeEditLog();
+            FakeEditLog fakeEditLog = new FakeEditLog(); // CHECKSTYLE IGNORE THIS LINE
 
-            Catalog catalog = Deencapsulation.newInstance(Catalog.class);
+            Env env = Deencapsulation.newInstance(Env.class);
+            InternalCatalog catalog = Deencapsulation.newInstance(InternalCatalog.class);
 
             Database db = new Database();
-            PaloAuth paloAuth = fetchAdminAccess();
+            AccessControllerManager accessManager = fetchAdminAccess();
 
-            new Expectations(catalog) {
+            new Expectations(env, catalog) {
                 {
-                    catalog.getAuth();
+                    env.getAccessManager();
                     minTimes = 0;
-                    result = paloAuth;
+                    result = accessManager;
+
+                    env.getInternalCatalog();
+                    minTimes = 0;
+                    result = catalog;
+
+                    env.getCurrentCatalog();
+                    minTimes = 0;
+                    result = catalog;
 
                     catalog.getDbNullable(TEST_DB_NAME);
                     minTimes = 0;
@@ -426,45 +437,21 @@ public class CatalogMocker {
                     minTimes = 0;
                     result = Lists.newArrayList(TEST_DB_NAME);
 
-                    catalog.getLoadInstance();
-                    minTimes = 0;
-                    result = new Load();
-
-                    catalog.getEditLog();
+                    env.getEditLog();
                     minTimes = 0;
                     result = new EditLog("name");
 
-                    catalog.changeDb((ConnectContext) any, WRONG_DB);
+                    env.changeDb((ConnectContext) any, WRONG_DB);
                     minTimes = 0;
                     result = new DdlException("failed");
 
-                    catalog.changeDb((ConnectContext) any, anyString);
+                    env.changeDb((ConnectContext) any, anyString);
                     minTimes = 0;
                 }
             };
-            return catalog;
+            return env;
         } catch (DdlException e) {
             return null;
         }
-    }
-
-    public static PaloAuth fetchBlockAccess() {
-        PaloAuth auth = new PaloAuth();
-        new Expectations(auth) {
-            {
-                auth.checkGlobalPriv((ConnectContext) any, (PrivPredicate) any);
-                minTimes = 0;
-                result = false;
-
-                auth.checkDbPriv((ConnectContext) any, anyString, (PrivPredicate) any);
-                minTimes = 0;
-                result = false;
-
-                auth.checkTblPriv((ConnectContext) any, anyString, anyString, (PrivPredicate) any);
-                minTimes = 0;
-                result = false;
-            }
-        };
-        return auth;
     }
 }

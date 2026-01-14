@@ -17,28 +17,32 @@
 
 package org.apache.doris.httpv2.restv2;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DatabaseIf;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.cluster.ClusterNamespace;
-import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.CatalogIf;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
 import org.apache.doris.httpv2.exception.BadRequestException;
 import org.apache.doris.httpv2.rest.RestBaseController;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
-import org.apache.doris.system.SystemInfoService;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -47,12 +51,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-
-import lombok.Getter;
-import lombok.Setter;
+import java.util.stream.Collectors;
 
 /**
  * And meta info like databases, tables and schema
@@ -69,16 +68,49 @@ public class MetaInfoActionV2 extends RestBaseController {
     private static final String PARAM_WITH_MV = "with_mv";
 
     /**
+     * Get all catalogs
+     * {
+     * "msg": "success",
+     * "code": 0,
+     * "data": [
+     * "internal",
+     * "catalog1",
+     * "catalog2"
+     * ],
+     * "count": 0
+     * }
+     */
+    @RequestMapping(path = "/api/meta/" + NAMESPACES,
+            method = {RequestMethod.GET})
+    public Object getAllCatalogs(
+            HttpServletRequest request, HttpServletResponse response) {
+        checkWithCookie(request, response, false);
+
+        // 1. get all catalogs with privilege
+        List<CatalogIf> ctls = Env.getCurrentEnv().getCatalogMgr()
+                .listCatalogsWithCheckPriv(ConnectContext.get().getCurrentUserIdentity());
+        List<String> ctlsNames = ctls.stream().map(CatalogIf::getName).collect(Collectors.toList());
+        // always set internal catalog at the first position
+        ctlsNames.remove(InternalCatalog.INTERNAL_CATALOG_NAME);
+        Collections.sort(ctlsNames);
+        ctlsNames.add(0, InternalCatalog.INTERNAL_CATALOG_NAME);
+
+        // handle limit offset
+        Pair<Integer, Integer> fromToIndex = getFromToIndex(request, ctlsNames.size());
+        return ResponseEntityBuilder.ok(ctlsNames.subList(fromToIndex.first, fromToIndex.second));
+    }
+
+    /**
      * Get all databases
      * {
-     * 	"msg": "success",
-     * 	"code": 0,
-     * 	"data": [
-     * 		"default_cluster:db1",
-     * 		"default_cluster:doris_audit_db__",
-     * 		"default_cluster:information_schema"
-     * 	],
-     * 	"count": 0
+     *   "msg": "success",
+     *   "code": 0,
+     *   "data": [
+     *     "db1",
+     *     "doris_audit_db__",
+     *     "information_schema"
+     *   ],
+     *   "count": 0
      * }
      */
     @RequestMapping(path = "/api/meta/" + NAMESPACES + "/{" + NS_KEY + "}/" + DATABASES,
@@ -88,43 +120,41 @@ public class MetaInfoActionV2 extends RestBaseController {
             HttpServletRequest request, HttpServletResponse response) {
         checkWithCookie(request, response, false);
 
-        if (!ns.equalsIgnoreCase(SystemInfoService.DEFAULT_CLUSTER)) {
-            return ResponseEntityBuilder.badRequest("Only support 'default_cluster' now");
+        String catalogName = ns.equalsIgnoreCase("default_cluster") ? InternalCatalog.INTERNAL_CATALOG_NAME : ns;
+        CatalogIf catalog = Env.getCurrentEnv().getCatalogMgr().getCatalog(catalogName);
+        if (catalog == null) {
+            return ResponseEntityBuilder.badRequest("Catalog '" + catalogName + "' not found");
         }
 
         // 1. get all database with privilege
-        List<String> dbNames = null;
-        try {
-            dbNames = Catalog.getCurrentCatalog().getClusterDbNames(ns);
-        } catch (AnalysisException e) {
-            return ResponseEntityBuilder.okWithCommonError("namespace does not exist: " + ns);
-        }
-        List<String> dbNameSet = Lists.newArrayList();
+        List<String> dbNames = catalog.getDbNames();
+        List<String> filteredDbNames = Lists.newArrayList();
         for (String fullName : dbNames) {
             final String db = ClusterNamespace.getNameFromFullName(fullName);
-            if (!Catalog.getCurrentCatalog().getAuth().checkDbPriv(ConnectContext.get(), fullName,
-                    PrivPredicate.SHOW)) {
+            if (!Env.getCurrentEnv().getAccessManager()
+                    .checkDbPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, fullName,
+                            PrivPredicate.SHOW)) {
                 continue;
             }
-            dbNameSet.add(db);
+            filteredDbNames.add(db);
         }
 
-        Collections.sort(dbNames);
+        Collections.sort(filteredDbNames);
 
         // handle limit offset
-        Pair<Integer, Integer> fromToIndex = getFromToIndex(request, dbNames.size());
-        return ResponseEntityBuilder.ok(dbNames.subList(fromToIndex.first, fromToIndex.second));
+        Pair<Integer, Integer> fromToIndex = getFromToIndex(request, filteredDbNames.size());
+        return ResponseEntityBuilder.ok(filteredDbNames.subList(fromToIndex.first, fromToIndex.second));
     }
 
     /** Get all tables of a database
      * {
-     * 	"msg": "success",
-     * 	"code": 0,
-     * 	"data": [
-     * 		"tbl1",
-     * 		"tbl2"
-     * 	],
-     * 	"count": 0
+     *   "msg": "success",
+     *   "code": 0,
+     *   "data": [
+     *     "tbl1",
+     *     "tbl2"
+     *   ],
+     *   "count": 0
      * }
      */
 
@@ -135,14 +165,16 @@ public class MetaInfoActionV2 extends RestBaseController {
             HttpServletRequest request, HttpServletResponse response) {
         checkWithCookie(request, response, false);
 
-        if (!ns.equalsIgnoreCase(SystemInfoService.DEFAULT_CLUSTER)) {
-            return ResponseEntityBuilder.badRequest("Only support 'default_cluster' now");
+        String catalogName = ns.equalsIgnoreCase("default_cluster") ? InternalCatalog.INTERNAL_CATALOG_NAME : ns;
+        CatalogIf catalog = Env.getCurrentEnv().getCatalogMgr().getCatalog(catalogName);
+        if (catalog == null) {
+            return ResponseEntityBuilder.badRequest("Catalog '" + catalogName + "' not found");
         }
 
         String fullDbName = getFullDbName(dbName);
-        Database db;
+        DatabaseIf<TableIf> db;
         try {
-            db = Catalog.getCurrentCatalog().getDbOrMetaException(fullDbName);
+            db = catalog.getDbOrMetaException(fullDbName);
         } catch (MetaNotFoundException e) {
             return ResponseEntityBuilder.okWithCommonError(e.getMessage());
         }
@@ -150,9 +182,10 @@ public class MetaInfoActionV2 extends RestBaseController {
         List<String> tblNames = Lists.newArrayList();
         db.readLock();
         try {
-            for (Table tbl : db.getTables()) {
-                if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), fullDbName, tbl.getName(),
-                        PrivPredicate.SHOW)) {
+            for (TableIf tbl : db.getTables()) {
+                if (!Env.getCurrentEnv().getAccessManager()
+                        .checkTblPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, fullDbName,
+                                tbl.getName(), PrivPredicate.SHOW)) {
                     continue;
                 }
                 tblNames.add(tbl.getName());
@@ -169,6 +202,7 @@ public class MetaInfoActionV2 extends RestBaseController {
     }
 
     /**
+     * Get schema of a table
      * {
      *     "msg": "success",
      *     "code": 0,
@@ -177,7 +211,7 @@ public class MetaInfoActionV2 extends RestBaseController {
      *         "schemaInfo": {
      *             "schemaMap": {
      *                 "tbl1": {
-     *                     "schema": {
+     *                     "schema": [{
      *                         "field": "k2",
      *                         "type": "INT",
      *                         "isNull": "true",
@@ -185,7 +219,7 @@ public class MetaInfoActionV2 extends RestBaseController {
      *                         "key": "true",
      *                         "aggrType": "None",
      *                         "comment": ""
-     *                     },
+     *                     }],
      *                     "keyType": "DUP_KEYS",
      *                     "baseIndex": true
      *                 }
@@ -204,20 +238,23 @@ public class MetaInfoActionV2 extends RestBaseController {
             HttpServletRequest request, HttpServletResponse response) throws UserException {
         checkWithCookie(request, response, false);
 
-        if (!ns.equalsIgnoreCase(SystemInfoService.DEFAULT_CLUSTER)) {
-            return ResponseEntityBuilder.badRequest("Only support 'default_cluster' now");
+        String catalogName = ns.equalsIgnoreCase("default_cluster") ? InternalCatalog.INTERNAL_CATALOG_NAME : ns;
+        CatalogIf catalog = Env.getCurrentEnv().getCatalogMgr().getCatalog(catalogName);
+        if (catalog == null) {
+            return ResponseEntityBuilder.badRequest("Catalog '" + catalogName + "' not found");
         }
 
         String fullDbName = getFullDbName(dbName);
-        checkTblAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, tblName, PrivPredicate.SHOW);
+        checkTblAuth(ConnectContext.get().getCurrentUserIdentity(), catalogName, fullDbName,
+                tblName, PrivPredicate.SHOW);
         String withMvPara = request.getParameter(PARAM_WITH_MV);
         boolean withMv = !Strings.isNullOrEmpty(withMvPara) && withMvPara.equals("1");
 
         try {
-            Database db = Catalog.getCurrentCatalog().getDbOrMetaException(fullDbName);
+            DatabaseIf db = catalog.getDbOrMetaException(fullDbName);
             db.readLock();
             try {
-                Table tbl = db.getTableOrMetaException(tblName, Table.TableType.OLAP);
+                TableIf tbl = db.getTableOrMetaException(tblName, Table.TableType.OLAP);
 
                 TableSchemaInfo tableSchemaInfo = new TableSchemaInfo();
                 tableSchemaInfo.setEngineType(tbl.getType().toString());
@@ -232,7 +269,7 @@ public class MetaInfoActionV2 extends RestBaseController {
         }
     }
 
-    private SchemaInfo generateSchemaInfo(Table tbl, boolean withMv) {
+    private SchemaInfo generateSchemaInfo(TableIf tbl, boolean withMv) {
         SchemaInfo schemaInfo = new SchemaInfo();
         Map<String, TableSchema> schemaMap = Maps.newHashMap();
         if (tbl.getType() == Table.TableType.OLAP) {
@@ -241,7 +278,7 @@ public class MetaInfoActionV2 extends RestBaseController {
             TableSchema baseTableSchema = new TableSchema();
             baseTableSchema.setBaseIndex(true);
             baseTableSchema.setKeyType(olapTable.getKeysTypeByIndexId(baseIndexId).name());
-            Schema baseSchema = generateSchame(olapTable.getSchemaByIndexId(baseIndexId));
+            List<Schema> baseSchema = generateSchame(olapTable.getSchemaByIndexId(baseIndexId));
             baseTableSchema.setSchema(baseSchema);
             schemaMap.put(olapTable.getIndexNameById(baseIndexId), baseTableSchema);
 
@@ -250,7 +287,7 @@ public class MetaInfoActionV2 extends RestBaseController {
                     TableSchema tableSchema = new TableSchema();
                     tableSchema.setBaseIndex(false);
                     tableSchema.setKeyType(olapTable.getKeysTypeByIndexId(indexId).name());
-                    Schema schema = generateSchame(olapTable.getSchemaByIndexId(indexId));
+                    List<Schema> schema = generateSchame(olapTable.getSchemaByIndexId(indexId));
                     tableSchema.setSchema(schema);
                     schemaMap.put(olapTable.getIndexNameById(indexId), tableSchema);
                 }
@@ -259,7 +296,7 @@ public class MetaInfoActionV2 extends RestBaseController {
         } else {
             TableSchema tableSchema = new TableSchema();
             tableSchema.setBaseIndex(false);
-            Schema schema = generateSchame(tbl.getBaseSchema());
+            List<Schema> schema = generateSchame(tbl.getBaseSchema());
             tableSchema.setSchema(schema);
             schemaMap.put(tbl.getName(), tableSchema);
             schemaInfo.setSchemaMap(schemaMap);
@@ -268,19 +305,19 @@ public class MetaInfoActionV2 extends RestBaseController {
         return schemaInfo;
     }
 
-    private Schema generateSchame(List<Column> columns) {
-        Schema schema = new Schema();
-        for (Column column : columns) {
+    private List<Schema> generateSchame(List<Column> columns) {
+        return columns.stream().map(column -> {
+            Schema schema = new Schema();
             schema.setField(column.getName());
             schema.setType(column.getType().toString());
             schema.setIsNull(String.valueOf(column.isAllowNull()));
             schema.setDefaultVal(column.getDefaultValue());
             schema.setKey(String.valueOf(column.isKey()));
-            schema.setAggrType(column.getAggregationType() == null ?
-                    "None" : column.getAggregationType().toString());
+            schema.setAggrType(column.getAggregationType() == null
+                    ? "None" : column.getAggregationType().toString());
             schema.setComment(column.getComment());
-        }
-        return schema;
+            return schema;
+        }).collect(Collectors.toList());
     }
 
     private void generateResult(Table tbl, boolean isBaseIndex,
@@ -294,7 +331,7 @@ public class MetaInfoActionV2 extends RestBaseController {
         propMap.put("isBase", isBaseIndex);
         propMap.put("tableType", tbl.getEngine());
         if (tbl.getType() == Table.TableType.OLAP) {
-            propMap.put("keyType", ((OlapTable)tbl).getKeysType());
+            propMap.put("keyType", ((OlapTable) tbl).getKeysType());
         }
         propMap.put("schema", generateSchema(tbl.getBaseSchema()));
     }
@@ -349,9 +386,9 @@ public class MetaInfoActionV2 extends RestBaseController {
         }
 
         if (maxNum <= 0) {
-            return Pair.create(0, 0);
+            return Pair.of(0, 0);
         }
-        return Pair.create(Math.min(offset, maxNum - 1), Math.min(limit + offset, maxNum));
+        return Pair.of(Math.min(offset, maxNum - 1), Math.min(limit + offset, maxNum));
     }
 
     @Getter
@@ -371,7 +408,7 @@ public class MetaInfoActionV2 extends RestBaseController {
     @Getter
     @Setter
     public static class TableSchema {
-        private Schema schema;
+        private List<Schema> schema;
         private boolean isBaseIndex;
         private String keyType;
     }

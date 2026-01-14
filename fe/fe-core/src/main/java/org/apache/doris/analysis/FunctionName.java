@@ -20,60 +20,50 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.ErrorCode;
-import org.apache.doris.common.ErrorReport;
-import org.apache.doris.common.io.Text;
-import org.apache.doris.common.io.Writable;
 import org.apache.doris.thrift.TFunctionName;
 
-import com.google.common.base.Strings;
-
+import com.google.gson.annotations.SerializedName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.util.Objects;
 
 /**
  * Class to represent a function name. Function names are specified as
  * db.function_name.
  */
-public class FunctionName implements Writable {
+public class FunctionName {
     private static final Logger LOG = LogManager.getLogger(FunctionName.class);
 
-    private String db_;
-    private String fn_;
+    @SerializedName("db")
+    private String db;
+    @SerializedName("fn")
+    private String fn;
 
     private FunctionName() {
     }
 
     public FunctionName(String db, String fn) {
-        db_ = db;
-        fn_ = fn.toLowerCase();
-        if (db_ != null) {
-            db_ = db_.toLowerCase();
-        }
+        this.db = db;
+        this.fn = fn.toLowerCase();
     }
 
     public FunctionName(String fn) {
-        db_ = null;
-        fn_ = fn.toLowerCase();
+        db = null;
+        this.fn = fn.toLowerCase();
     }
 
     public FunctionName(TFunctionName thriftName) {
-        db_ = thriftName.db_name.toLowerCase();
-        fn_ = thriftName.function_name.toLowerCase();
+        db = thriftName.db_name.toLowerCase();
+        fn = thriftName.function_name.toLowerCase();
     }
 
     // Same as FunctionName but for builtins and we'll leave the case
     // as is since we aren't matching by string.
     public static FunctionName createBuiltinName(String fn) {
         FunctionName name = new FunctionName(fn);
-        name.fn_ = fn;
+        name.fn = fn;
         return name;
     }
 
@@ -87,90 +77,61 @@ public class FunctionName implements Writable {
             return false;
         }
         FunctionName o = (FunctionName) obj;
-        if ((db_ == null || o.db_ == null) && (db_ != o.db_)) {
-            if (db_ == null && o.db_ != null) {
+        if ((db == null || o.db == null) && (db != o.db)) {
+            if (db == null && o.db != null) {
                 return false;
             }
-            if (db_ != null && o.db_ == null) {
+            if (db != null && o.db == null) {
                 return false;
             }
-            if (!db_.equalsIgnoreCase(o.db_)) {
+            if (!db.equalsIgnoreCase(o.db)) {
                 return false;
             }
         }
-        return fn_.equalsIgnoreCase(o.fn_);
+        return fn.equalsIgnoreCase(o.fn);
     }
 
     public String getDb() {
-        return db_;
+        return db;
     }
 
     public void setDb(String db) {
-        db_ = db;
+        this.db = db;
+    }
+
+    public void setFn(String fn) {
+        this.fn = fn;
     }
 
     public String getFunction() {
-        return fn_;
+        return fn;
     }
 
     public boolean isFullyQualified() {
-        return db_ != null;
+        return db != null;
     }
 
     @Override
     public String toString() {
-        if (db_ == null) {
-            return fn_;
-        }
-        return db_ + "." + fn_;
-    }
-
-    // used to analyze db element in function name, add cluster
-    public String analyzeDb(Analyzer analyzer) throws AnalysisException {
-        String db = db_;
         if (db == null) {
-            db = analyzer.getDefaultDb();
-        } else {
-            if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NAME_NULL);
-            }
-            db = ClusterNamespace.getFullName(analyzer.getClusterName(), db);
+            return fn;
         }
-        return db;
+        return db + "." + fn;
     }
 
-    public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (fn_.length() == 0) {
+    public void analyze(SetType type) throws AnalysisException {
+        if (fn.length() == 0) {
             throw new AnalysisException("Function name can not be empty.");
         }
-        for (int i = 0; i < fn_.length(); ++i) {
-            if (!isValidCharacter(fn_.charAt(i))) {
-                throw new AnalysisException(
-                  "Function names must be all alphanumeric or underscore. " +
-                    "Invalid name: " + fn_);
+        for (int i = 0; i < fn.length(); ++i) {
+            if (!isValidCharacter(fn.charAt(i))) {
+                throw new AnalysisException("Function names must be all alphanumeric or underscore. "
+                          + "Invalid name: " + fn);
             }
         }
-        if (Character.isDigit(fn_.charAt(0))) {
-            throw new AnalysisException("Function cannot start with a digit: " + fn_);
+        if (Character.isDigit(fn.charAt(0))) {
+            throw new AnalysisException("Function cannot start with a digit: " + fn);
         }
-        if (db_ == null) {
-            db_ = analyzer.getDefaultDb();
-            if (Strings.isNullOrEmpty(db_)) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
-            }
-        } else {
-            if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NAME_NULL);
-            }
-            db_ = ClusterNamespace.getFullName(analyzer.getClusterName(), db_);
-        }
-
-        // If the function name is not fully qualified, it must not be the same as a builtin
-//        if (!isFullyQualified() && OpcodeRegistry.instance().getFunctionOperator(
-//          getFunction()) != FunctionOperator.INVALID_OPERATOR) {
-//            throw new AnalysisException(
-//              "Function cannot have the same name as a builtin: " + getFunction());
-//        }
     }
 
     private boolean isValidCharacter(char c) {
@@ -178,38 +139,19 @@ public class FunctionName implements Writable {
     }
 
     public TFunctionName toThrift() {
-        TFunctionName name = new TFunctionName(fn_);
-        name.setDbName(db_);
-        name.setFunctionName(fn_);
+        TFunctionName name = new TFunctionName(fn);
+        name.setDbName(db);
+        name.setFunctionName(fn);
         return name;
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        if (db_ != null) {
-            out.writeBoolean(true);
-            Text.writeString(out, db_);
-        } else {
-            out.writeBoolean(false);
-        }
-        Text.writeString(out, fn_);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        if (in.readBoolean()) {
-            db_ = Text.readString(in);
-        }
-        fn_ = Text.readString(in);
-    }
-
-    public static FunctionName read(DataInput in) throws IOException{
-        FunctionName functionName = new FunctionName();
-        functionName.readFields(in);
-        return functionName;
+    public int hashCode() {
+        return 31 * Objects.hashCode(db) + Objects.hashCode(fn);
     }
 
     @Override
-    public int hashCode() {
-        return 31 * Objects.hashCode(db_) + Objects.hashCode(fn_);
+    public FunctionName clone() {
+        return new FunctionName(db, fn);
     }
 }

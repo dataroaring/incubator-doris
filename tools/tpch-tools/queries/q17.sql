@@ -15,6 +15,8 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
+-- Modified
+
 select
     sum(l_extendedprice) / 7.0 as avg_yearly
 from

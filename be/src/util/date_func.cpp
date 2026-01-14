@@ -17,11 +17,23 @@
 
 #include "util/date_func.h"
 
-#include <iomanip>
+#include <fmt/compile.h>
+#include <fmt/format.h>
+#include <glog/logging.h>
+
+#include <cstring>
+#include <ctime>
+
+#include "common/cast_set.h"
+#include "vec/common/int_exp.h"
+#include "vec/core/types.h"
+#include "vec/functions/cast/cast_to_timestamptz.h"
+#include "vec/runtime/time_value.h"
+#include "vec/runtime/vdatetime_value.h"
 
 namespace doris {
-
-uint64_t timestamp_from_datetime(const std::string& datetime_str) {
+#include "common/compile_check_begin.h"
+VecDateTimeValue timestamp_from_datetime(const std::string& datetime_str) {
     tm time_tm;
     char* res = strptime(datetime_str.c_str(), "%Y-%m-%d %H:%M:%S", &time_tm);
 
@@ -36,52 +48,122 @@ uint64_t timestamp_from_datetime(const std::string& datetime_str) {
         value = 14000101000000;
     }
 
-    return value;
+    return VecDateTimeValue::create_from_olap_datetime(value);
 }
 
-uint24_t timestamp_from_date(const std::string& date_str) {
+VecDateTimeValue timestamp_from_date(const std::string& date_str) {
     tm time_tm;
     char* res = strptime(date_str.c_str(), "%Y-%m-%d", &time_tm);
 
-    int value = 0;
+    uint32_t value = 0;
     if (nullptr != res) {
-        value = (time_tm.tm_year + 1900) * 16 * 32 + (time_tm.tm_mon + 1) * 32 + time_tm.tm_mday;
+        value = (uint32_t)((time_tm.tm_year + 1900) * 16 * 32 + (time_tm.tm_mon + 1) * 32 +
+                           time_tm.tm_mday);
     } else {
+        LOG(WARNING) << "Invalid date string: " << date_str;
         // 1400 - 01 - 01
         value = 716833;
     }
 
-    return uint24_t(value);
+    return VecDateTimeValue::create_from_olap_date(value);
 }
-// refer to https://dev.mysql.com/doc/refman/5.7/en/time.html
-// the time value between '-838:59:59' and '838:59:59'
-int32_t time_to_buffer_from_double(double time, char* buffer) {
+
+//FIXME: try to remove or refactor all those time input/output functions.
+uint8_t timev2_to_buffer_from_double(double time, char* buffer, int scale) {
     char* begin = buffer;
     if (time < 0) {
         time = -time;
         *buffer++ = '-';
     }
-    if (time > 3020399) {
-        time = 3020399;
-    }
-    int64_t hour = (int64_t)(time / 3600);
+    auto m_time = (uint64_t)TimeValue::limit_with_bound(time);
+
+    auto hour = static_cast<uint16_t>(m_time / (3600ULL * 1000 * 1000));
     if (hour >= 100) {
-        auto f = fmt::format_int(hour);
-        memcpy(buffer, f.data(), f.size());
-        buffer = buffer + f.size();
+        buffer = fmt::format_to(buffer, FMT_COMPILE("{}"), hour);
     } else {
         *buffer++ = (char)('0' + (hour / 10));
         *buffer++ = (char)('0' + (hour % 10));
     }
     *buffer++ = ':';
-    int32_t minute = ((int32_t)(time / 60)) % 60;
+    m_time %= 3600ULL * 1000 * 1000;
+
+    auto minute = static_cast<uint8_t>(m_time / (60 * 1000 * 1000));
     *buffer++ = (char)('0' + (minute / 10));
     *buffer++ = (char)('0' + (minute % 10));
     *buffer++ = ':';
-    int32_t second = ((int32_t)time) % 60;
+    m_time %= 60 * 1000 * 1000;
+
+    auto second = static_cast<uint8_t>(m_time / (1000 * 1000));
     *buffer++ = (char)('0' + (second / 10));
     *buffer++ = (char)('0' + (second % 10));
-    return buffer - begin;
+    m_time %= 1000 * 1000;
+    if (scale == 0) {
+        return static_cast<uint8_t>(buffer - begin);
+    }
+
+    *buffer++ = '.';
+    memset(buffer, '0', scale);
+    buffer += scale;
+    int32_t micosecond = m_time % (1000 * 1000);
+    micosecond /= common::exp10_i32(6 - scale);
+    auto* it = buffer - 1;
+    while (micosecond) {
+        *it = (char)('0' + (micosecond % 10));
+        micosecond /= 10;
+        it--;
+    }
+    DCHECK_LT(scale, 10);
+    return static_cast<uint8_t>(buffer - begin);
 }
 
+std::string timev2_to_buffer_from_double(double time, int scale) {
+    fmt::memory_buffer buffer;
+    if (time < 0) {
+        time = -time;
+        fmt::format_to(buffer, "-");
+    }
+    auto m_time = TimeValue::limit_with_bound(time);
+    auto hour = TimeValue::hour(m_time);
+    if (hour >= 100) {
+        fmt::format_to(buffer, fmt::format("{}", hour));
+    } else {
+        fmt::format_to(buffer, fmt::format("{:02d}", hour));
+    }
+    auto minute = TimeValue::minute(m_time);
+    auto second = TimeValue::second(m_time);
+    auto micosecond = TimeValue::microsecond(m_time);
+    micosecond /= common::exp10_i32(6 - scale);
+    switch (scale) {
+    case 0:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}"), minute, second));
+        break;
+    case 1:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:01d}"), minute, second,
+                                           micosecond));
+        break;
+    case 2:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:02d}"), minute, second,
+                                           micosecond));
+        break;
+    case 3:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:03d}"), minute, second,
+                                           micosecond));
+        break;
+    case 4:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:04d}"), minute, second,
+                                           micosecond));
+        break;
+    case 5:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:05d}"), minute, second,
+                                           micosecond));
+        break;
+    case 6:
+        fmt::format_to(buffer, fmt::format(FMT_COMPILE(":{:02d}:{:02d}.{:06d}"), minute, second,
+                                           micosecond));
+        break;
+    }
+
+    return fmt::to_string(buffer);
+}
+#include "common/compile_check_end.h"
 } // namespace doris

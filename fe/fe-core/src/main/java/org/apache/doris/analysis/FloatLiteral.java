@@ -18,28 +18,32 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.NotImplementedException;
+import org.apache.doris.common.FormatOptions;
+import org.apache.doris.nereids.trees.expressions.literal.format.FractionalFormat;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TFloatLiteral;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
-import java.math.BigDecimal;
+import com.google.gson.annotations.SerializedName;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.text.NumberFormat;
 
-public class FloatLiteral extends LiteralExpr {
+public class FloatLiteral extends NumericLiteralExpr {
+    @SerializedName("v")
     private double value;
-    
+
     public FloatLiteral() {
     }
 
     public FloatLiteral(Double value) {
         init(value);
+        this.nullable = false;
     }
 
     /**
@@ -48,7 +52,7 @@ public class FloatLiteral extends LiteralExpr {
     public FloatLiteral(Double value, Type type) {
         this.value = value.doubleValue();
         this.type = type;
-        analysisDone();
+        this.nullable = false;
     }
 
     public FloatLiteral(String value) throws AnalysisException {
@@ -59,6 +63,7 @@ public class FloatLiteral extends LiteralExpr {
             throw new AnalysisException("Invalid floating-point literal: " + value, e);
         }
         init(floatValue);
+        this.nullable = false;
     }
 
     protected FloatLiteral(FloatLiteral other) {
@@ -114,8 +119,14 @@ public class FloatLiteral extends LiteralExpr {
 
     @Override
     public int compareLiteral(LiteralExpr expr) {
+        if (expr instanceof PlaceHolderExpr) {
+            return this.compareLiteral(((PlaceHolderExpr) expr).getLiteral());
+        }
         if (expr instanceof NullLiteral) {
             return 1;
+        }
+        if (expr == MaxLiteral.MAX_VALUE) {
+            return -1;
         }
         return Double.compare(value, expr.getDoubleValue());
     }
@@ -126,13 +137,57 @@ public class FloatLiteral extends LiteralExpr {
     }
 
     @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        return getStringValue();
+    }
+
+    @Override
     public String getStringValue() {
         // TODO: Here is weird use float to represent TIME type
         // rethink whether it is reasonable to use this way
-        if (type.equals(Type.TIME)) {
+        if (type.equals(Type.TIMEV2)) {
             return timeStrFromFloat(value);
         }
-        return Double.toString(value);
+        NumberFormat nf = NumberFormat.getInstance();
+        nf.setGroupingUsed(false);
+        if (type == Type.FLOAT) {
+            nf.setMaximumFractionDigits(7);
+        } else {
+            nf.setMaximumFractionDigits(16);
+        }
+        return nf.format(value);
+    }
+
+    @Override
+    public String getStringValueForQuery(FormatOptions options) {
+        if (type == Type.TIMEV2) {
+            // FloatLiteral used to represent TIME type, here we need to remove apostrophe from timeStr
+            // for example '11:22:33' -> 11:22:33
+            String timeStr = getStringValue();
+            return timeStr.substring(1, timeStr.length() - 1);
+        } else {
+            if (type == Type.FLOAT) {
+                Float fValue = (float) value;
+                if (fValue.equals(Float.POSITIVE_INFINITY)) {
+                    value = Double.POSITIVE_INFINITY;
+                }
+                if (fValue.equals(Float.NEGATIVE_INFINITY)) {
+                    value = Double.NEGATIVE_INFINITY;
+                }
+            }
+            return FractionalFormat.getFormatStringValue(value, type == Type.DOUBLE ? 16 : 7,
+                    type == Type.DOUBLE ? "%.15E" : "%.6E");
+        }
+    }
+
+    @Override
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        String ret = this.getStringValueForQuery(options);
+        if (type == Type.TIMEV2) {
+            ret = options.getNestedStringWrapper() + ret + options.getNestedStringWrapper();
+        }
+        return ret;
     }
 
     @Override
@@ -156,52 +211,11 @@ public class FloatLiteral extends LiteralExpr {
     }
 
     @Override
-    protected Expr uncheckedCastTo(Type targetType) throws AnalysisException {
-        if (!(targetType.isFloatingPointType() || targetType.isDecimalV2())) {
-            return super.uncheckedCastTo(targetType);
-        }
-        if (targetType.isFloatingPointType()) {
-            if (!type.equals(targetType)) {
-                FloatLiteral floatLiteral = new FloatLiteral(this);
-                floatLiteral.setType(targetType);
-                return floatLiteral;
-            }
-            return this;
-        } else if (targetType.isDecimalV2()) {
-            return new DecimalLiteral(new BigDecimal(value));
-        }
-        return this;
-    }
-
-    @Override
-    public void swapSign() throws NotImplementedException {
-        // swapping sign does not change the type
-        value = -value;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeDouble(value);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        super.readFields(in);
-        value = in.readDouble();
-    }
-    
-    public static FloatLiteral read(DataInput in) throws IOException {
-        FloatLiteral literal = new FloatLiteral();
-        literal.readFields(in);
-        return literal;
-    }
-
-    @Override
     public int hashCode() {
         return 31 * super.hashCode() + Double.hashCode(value);
     }
 
-    private String timeStrFromFloat (double time) {
+    private String timeStrFromFloat(double time) {
         String timeStr = "";
 
         if (time < 0) {
@@ -209,11 +223,10 @@ public class FloatLiteral extends LiteralExpr {
             time = -time;
         }
         int hour = (int) (time / 60 / 60);
-        int minute = (int)((time / 60)) % 60;
+        int minute = (int) ((time / 60)) % 60;
         int second = (int) (time) % 60;
 
         return "'" + timeStr + String.format("%02d:%02d:%02d", hour, minute, second) + "'";
     }
 
 }
-

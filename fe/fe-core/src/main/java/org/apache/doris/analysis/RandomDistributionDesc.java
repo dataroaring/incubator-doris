@@ -22,29 +22,27 @@ import org.apache.doris.catalog.DistributionInfo;
 import org.apache.doris.catalog.DistributionInfo.DistributionInfoType;
 import org.apache.doris.catalog.RandomDistributionInfo;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.nereids.trees.plans.commands.info.DistributionDescriptor;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
 public class RandomDistributionDesc extends DistributionDesc {
-    int numBucket;
-
-    public RandomDistributionDesc() {
+    public RandomDistributionDesc(int numBucket) {
+        super(numBucket);
         type = DistributionInfoType.RANDOM;
     }
 
-    public RandomDistributionDesc(int numBucket) {
+    public RandomDistributionDesc(int numBucket, boolean autoBucket) {
+        super(numBucket, autoBucket);
         type = DistributionInfoType.RANDOM;
-        this.numBucket = numBucket;
     }
 
     @Override
-    public void analyze(Set<String> colSet, List<ColumnDef> columnDefs) throws AnalysisException {
+    public void analyze(Set<String> colSet, List<ColumnDef> columnDefs, KeysDesc keysDesc) throws AnalysisException {
         if (numBucket <= 0) {
-            throw new AnalysisException("Number of random distribution should be larger than zero.");
+            throw new AnalysisException("Number of random distribution should be greater than zero.");
         }
     }
 
@@ -52,23 +50,28 @@ public class RandomDistributionDesc extends DistributionDesc {
     public String toSql() {
         StringBuilder stringBuilder = new StringBuilder();
         stringBuilder.append("DISTRIBUTED BY RANDOM\n")
-                .append("BUCKETS ").append(numBucket);
+                .append("BUCKETS ");
+        if (autoBucket) {
+            stringBuilder.append("AUTO");
+        } else {
+            stringBuilder.append(numBucket);
+        }
         return stringBuilder.toString();
     }
 
     @Override
     public DistributionInfo toDistributionInfo(List<Column> columns) {
-        RandomDistributionInfo randomDistributionInfo = new RandomDistributionInfo(numBucket);
+        RandomDistributionInfo randomDistributionInfo = new RandomDistributionInfo(numBucket, autoBucket);
         return randomDistributionInfo;
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeInt(numBucket);
+    public List<String> getDistributionColumnNames() {
+        return null;
     }
 
-    public void readFields(DataInput in) throws IOException {
-        numBucket = in.readInt();
+    @Override
+    public DistributionDescriptor toDistributionDescriptor() {
+        return new DistributionDescriptor(false, this.autoBucket, this.numBucket, new ArrayList<>());
     }
 }

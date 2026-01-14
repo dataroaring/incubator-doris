@@ -18,136 +18,194 @@
 // https://github.com/ClickHouse/ClickHouse/blob/master/src/Functions/IntDiv.cpp
 // and modified by Doris
 
-#ifdef __SSE2__
-#define LIBDIVIDE_SSE2 1
-#endif
-
-#include "vec/functions/int_div.h"
-
 #include <libdivide.h>
 
-#include "vec/functions/function_binary_arithmetic.h"
-#include "vec/functions/function_binary_arithmetic_to_null_type.h"
+#include <utility>
+
+#include "vec/data_types/data_type_number.h"
 #include "vec/functions/simple_function_factory.h"
 
 namespace doris::vectorized {
 
-/// Optimizations for integer division by a constant.
+template <typename Impl>
+class FunctionIntDiv : public IFunction {
+public:
+    static constexpr auto name = "int_divide";
 
-template <typename A, typename B>
-struct DivideIntegralByConstantImpl : BinaryOperationImplBase<A, B, DivideIntegralImpl<A, B>> {
-    using ResultType = typename DivideIntegralImpl<A, B>::ResultType;
+    static FunctionPtr create() { return std::make_shared<FunctionIntDiv>(); }
 
-    static void vector_constant(const PaddedPODArray<A>& a, B b, PaddedPODArray<ResultType>& c) {
-        // TODO: Support return null in the furture
-        if (UNLIKELY(b == 0)) {
-            //            throw Exception("Division by zero", TStatusCode::VEC_ILLEGAL_DIVISION);
-            memset(c.data(), 0, sizeof(ResultType) * c.size());
-            return;
+    FunctionIntDiv() = default;
+
+    String get_name() const override { return name; }
+
+    size_t get_number_of_arguments() const override { return 2; }
+
+    DataTypes get_variadic_argument_types_impl() const override {
+        return Impl::get_variadic_argument_types();
+    }
+
+    DataTypePtr get_return_type_impl(const DataTypes& arguments) const override {
+        DataTypePtr type_res =
+                std::make_shared<typename PrimitiveTypeTraits<Impl::ResultType>::DataType>();
+        return make_nullable(type_res);
+    }
+
+    Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
+                        uint32_t result, size_t input_rows_count) const override {
+        auto& column_left = block.get_by_position(arguments[0]).column;
+        auto& column_right = block.get_by_position(arguments[1]).column;
+        bool is_const_left = is_column_const(*column_left);
+        bool is_const_right = is_column_const(*column_right);
+
+        ColumnPtr column_result = nullptr;
+        if (is_const_left && is_const_right) {
+            column_result = constant_constant(column_left, column_right);
+        } else if (is_const_left) {
+            column_result = constant_vector(column_left, column_right);
+        } else if (is_const_right) {
+            column_result = vector_constant(column_left, column_right);
+        } else {
+            column_result = vector_vector(column_left, column_right);
         }
+        block.replace_by_position(result, std::move(column_result));
+        return Status::OK();
+    }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
+private:
+    ColumnPtr constant_constant(ColumnPtr column_left, ColumnPtr column_right) const {
+        const auto* column_left_ptr = assert_cast<const ColumnConst*>(column_left.get());
+        const auto* column_right_ptr = assert_cast<const ColumnConst*>(column_right.get());
+        DCHECK(column_left_ptr != nullptr && column_right_ptr != nullptr);
 
-        if (UNLIKELY(std::is_signed_v<B> && b == -1)) {
-            size_t size = a.size();
-            for (size_t i = 0; i < size; ++i) c[i] = -c[i];
-            return;
-        }
+        ColumnPtr column_result = nullptr;
 
-#pragma GCC diagnostic pop
+        column_result =
+                Impl::constant_constant(column_left_ptr->template get_value<Impl::ResultType>(),
+                                        column_right_ptr->template get_value<Impl::ResultType>());
 
-        libdivide::divider<A> divider(b);
+        return ColumnConst::create(std::move(column_result), column_left->size());
+    }
 
-        size_t size = a.size();
-        const A* a_pos = a.data();
-        const A* a_end = a_pos + size;
-        ResultType* c_pos = c.data();
+    ColumnPtr vector_constant(ColumnPtr column_left, ColumnPtr column_right) const {
+        const auto* column_right_ptr = assert_cast<const ColumnConst*>(column_right.get());
+        DCHECK(column_right_ptr != nullptr);
 
-#ifdef __SSE2__
-        static constexpr size_t values_per_sse_register = 16 / sizeof(A);
-        const A* a_end_sse = a_pos + size / values_per_sse_register * values_per_sse_register;
+        return Impl::vector_constant(column_left->get_ptr(),
+                                     column_right_ptr->template get_value<Impl::ResultType>());
+    }
 
-        while (a_pos < a_end_sse) {
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(c_pos),
-                             _mm_loadu_si128(reinterpret_cast<const __m128i*>(a_pos)) / divider);
+    ColumnPtr constant_vector(ColumnPtr column_left, ColumnPtr column_right) const {
+        const auto* column_left_ptr = assert_cast<const ColumnConst*>(column_left.get());
+        DCHECK(column_left_ptr != nullptr);
 
-            a_pos += values_per_sse_register;
-            c_pos += values_per_sse_register;
-        }
-#endif
+        return Impl::constant_vector(column_left_ptr->template get_value<Impl::ResultType>(),
+                                     column_right->get_ptr());
+    }
 
-        while (a_pos < a_end) {
-            *c_pos = *a_pos / divider;
-            ++a_pos;
-            ++c_pos;
-        }
+    ColumnPtr vector_vector(ColumnPtr column_left, ColumnPtr column_right) const {
+        return Impl::vector_vector(column_left->get_ptr(), column_right->get_ptr());
     }
 };
 
-/** Specializations are specified for dividing numbers of the type UInt64 and UInt32 by the numbers of the same sign.
-  * Can be expanded to all possible combinations, but more code is needed.
-  */
+template <PrimitiveType Type>
+struct DivideIntegralImpl {
+    using Arg = typename PrimitiveTypeTraits<Type>::ColumnItemType;
+    using ColumnType = typename PrimitiveTypeTraits<Type>::ColumnType;
+    static constexpr PrimitiveType ResultType = Type;
 
-template <>
-struct BinaryOperationImpl<UInt64, UInt8, DivideIntegralImpl<UInt64, UInt8>>
-        : DivideIntegralByConstantImpl<UInt64, UInt8> {};
-template <>
-struct BinaryOperationImpl<UInt64, UInt16, DivideIntegralImpl<UInt64, UInt16>>
-        : DivideIntegralByConstantImpl<UInt64, UInt16> {};
-template <>
-struct BinaryOperationImpl<UInt64, UInt32, DivideIntegralImpl<UInt64, UInt32>>
-        : DivideIntegralByConstantImpl<UInt64, UInt32> {};
-template <>
-struct BinaryOperationImpl<UInt64, UInt64, DivideIntegralImpl<UInt64, UInt64>>
-        : DivideIntegralByConstantImpl<UInt64, UInt64> {};
+    static DataTypes get_variadic_argument_types() {
+        return {std::make_shared<typename PrimitiveTypeTraits<Type>::DataType>(),
+                std::make_shared<typename PrimitiveTypeTraits<Type>::DataType>()};
+    }
 
-template <>
-struct BinaryOperationImpl<UInt32, UInt8, DivideIntegralImpl<UInt32, UInt8>>
-        : DivideIntegralByConstantImpl<UInt32, UInt8> {};
-template <>
-struct BinaryOperationImpl<UInt32, UInt16, DivideIntegralImpl<UInt32, UInt16>>
-        : DivideIntegralByConstantImpl<UInt32, UInt16> {};
-template <>
-struct BinaryOperationImpl<UInt32, UInt32, DivideIntegralImpl<UInt32, UInt32>>
-        : DivideIntegralByConstantImpl<UInt32, UInt32> {};
-template <>
-struct BinaryOperationImpl<UInt32, UInt64, DivideIntegralImpl<UInt32, UInt64>>
-        : DivideIntegralByConstantImpl<UInt32, UInt64> {};
+    static void apply(const typename ColumnType::Container& a, Arg b,
+                      typename PrimitiveTypeTraits<ResultType>::ColumnType::Container& c,
+                      PaddedPODArray<UInt8>& null_map) {
+        size_t size = c.size();
+        UInt8 is_null = b == 0;
+        memset(null_map.data(), is_null, size);
 
-template <>
-struct BinaryOperationImpl<Int64, Int8, DivideIntegralImpl<Int64, Int8>>
-        : DivideIntegralByConstantImpl<Int64, Int8> {};
-template <>
-struct BinaryOperationImpl<Int64, Int16, DivideIntegralImpl<Int64, Int16>>
-        : DivideIntegralByConstantImpl<Int64, Int16> {};
-template <>
-struct BinaryOperationImpl<Int64, Int32, DivideIntegralImpl<Int64, Int32>>
-        : DivideIntegralByConstantImpl<Int64, Int32> {};
-template <>
-struct BinaryOperationImpl<Int64, Int64, DivideIntegralImpl<Int64, Int64>>
-        : DivideIntegralByConstantImpl<Int64, Int64> {};
+        if (!is_null) {
+            if constexpr (!std::is_floating_point_v<Arg> && !std::is_same_v<Arg, Int128> &&
+                          !std::is_same_v<Arg, Int8> && !std::is_same_v<Arg, UInt8>) {
+                const auto divider = libdivide::divider<Arg>(Arg(b));
+                for (size_t i = 0; i < size; i++) {
+                    c[i] = a[i] / divider;
+                }
+            } else {
+                for (size_t i = 0; i < size; i++) {
+                    c[i] = typename PrimitiveTypeTraits<ResultType>::ColumnItemType(a[i] / b);
+                }
+            }
+        }
+    }
 
-template <>
-struct BinaryOperationImpl<Int32, Int8, DivideIntegralImpl<Int32, Int8>>
-        : DivideIntegralByConstantImpl<Int32, Int8> {};
-template <>
-struct BinaryOperationImpl<Int32, Int16, DivideIntegralImpl<Int32, Int16>>
-        : DivideIntegralByConstantImpl<Int32, Int16> {};
-template <>
-struct BinaryOperationImpl<Int32, Int32, DivideIntegralImpl<Int32, Int32>>
-        : DivideIntegralByConstantImpl<Int32, Int32> {};
-template <>
-struct BinaryOperationImpl<Int32, Int64, DivideIntegralImpl<Int32, Int64>>
-        : DivideIntegralByConstantImpl<Int32, Int64> {};
+    static inline typename PrimitiveTypeTraits<ResultType>::ColumnItemType apply(Arg a, Arg b,
+                                                                                 UInt8& is_null) {
+        is_null = b == 0;
+        return typename PrimitiveTypeTraits<ResultType>::ColumnItemType(a / (b + is_null));
+    }
 
-struct NameIntDiv {
-    static constexpr auto name = "int_divide";
+    static ColumnPtr constant_constant(Arg a, Arg b) {
+        auto column_result = ColumnType ::create(1);
+
+        auto null_map = ColumnUInt8::create(1, 0);
+        column_result->get_element(0) = apply(a, b, null_map->get_element(0));
+        return ColumnNullable::create(std::move(column_result), std::move(null_map));
+    }
+
+    static ColumnPtr vector_constant(ColumnPtr column_left, Arg b) {
+        const auto* column_left_ptr = assert_cast<const ColumnType*>(column_left.get());
+        auto column_result = ColumnType::create(column_left->size());
+        DCHECK(column_left_ptr != nullptr);
+
+        auto null_map = ColumnUInt8::create(column_left->size(), 0);
+        apply(column_left_ptr->get_data(), b, column_result->get_data(), null_map->get_data());
+        return ColumnNullable::create(std::move(column_result), std::move(null_map));
+    }
+
+    static ColumnPtr constant_vector(Arg a, ColumnPtr column_right) {
+        const auto* column_right_ptr = assert_cast<const ColumnType*>(column_right.get());
+        auto column_result = ColumnType::create(column_right->size());
+        DCHECK(column_right_ptr != nullptr);
+
+        auto null_map = ColumnUInt8::create(column_right->size(), 0);
+        auto& b = column_right_ptr->get_data();
+        auto& c = column_result->get_data();
+        auto& n = null_map->get_data();
+        size_t size = b.size();
+        for (size_t i = 0; i < size; ++i) {
+            c[i] = apply(a, b[i], n[i]);
+        }
+        return ColumnNullable::create(std::move(column_result), std::move(null_map));
+    }
+
+    static ColumnPtr vector_vector(ColumnPtr column_left, ColumnPtr column_right) {
+        const auto* column_left_ptr = assert_cast<const ColumnType*>(column_left.get());
+        const auto* column_right_ptr = assert_cast<const ColumnType*>(column_right.get());
+
+        auto column_result = ColumnType::create(column_left->size());
+        DCHECK(column_left_ptr != nullptr && column_right_ptr != nullptr);
+
+        auto null_map = ColumnUInt8::create(column_result->size(), 0);
+        auto& a = column_left_ptr->get_data();
+        auto& b = column_right_ptr->get_data();
+        auto& c = column_result->get_data();
+        auto& n = null_map->get_data();
+        size_t size = a.size();
+        for (size_t i = 0; i < size; ++i) {
+            c[i] = apply(a[i], b[i], n[i]);
+        }
+        return ColumnNullable::create(std::move(column_result), std::move(null_map));
+    }
 };
-using FunctionIntDiv = FunctionBinaryArithmeticToNullType<DivideIntegralImpl, NameIntDiv, false>;
 
 void register_function_int_div(SimpleFunctionFactory& factory) {
-    factory.register_function<FunctionIntDiv>();
+    factory.register_function<FunctionIntDiv<DivideIntegralImpl<TYPE_TINYINT>>>();
+    factory.register_function<FunctionIntDiv<DivideIntegralImpl<TYPE_SMALLINT>>>();
+    factory.register_function<FunctionIntDiv<DivideIntegralImpl<TYPE_INT>>>();
+    factory.register_function<FunctionIntDiv<DivideIntegralImpl<TYPE_BIGINT>>>();
+    factory.register_function<FunctionIntDiv<DivideIntegralImpl<TYPE_LARGEINT>>>();
 }
 
 } // namespace doris::vectorized

@@ -17,17 +17,23 @@
 
 #pragma once
 
-#include <stdint.h>
-#include <time.h>
-
+#include <cstdint>
 #include <string>
-
-#include "olap/field.h"
 
 namespace doris {
 
-uint64_t timestamp_from_datetime(const std::string& datetime_str);
-uint24_t timestamp_from_date(const std::string& date_str);
-int32_t time_to_buffer_from_double(double time, char* buffer);
+struct DateV2ValueType;
+struct DateTimeV2ValueType;
 
+template <typename T>
+class DateV2Value;
+
+class VecDateTimeValue;
+
+class TimestampTzValue;
+
+VecDateTimeValue timestamp_from_datetime(const std::string& datetime_str);
+VecDateTimeValue timestamp_from_date(const std::string& date_str);
+uint8_t timev2_to_buffer_from_double(double time, char* buffer, int scale);
+std::string timev2_to_buffer_from_double(double time, int scale);
 } // namespace doris

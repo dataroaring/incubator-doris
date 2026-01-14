@@ -17,21 +17,13 @@
 
 #pragma once
 
+#ifdef EINTERNAL
+#undef EINTERNAL
+#endif
+
 // all header need by brpc is contain in this file.
 // include this file instead of include <brpc/xxx.h>.
-
-#include <service/brpc_conflict.h>
-
 #include <brpc/channel.h>
-#include <brpc/closure_guard.h>
-#include <brpc/controller.h>
-#include <brpc/protocol.h>
-#include <brpc/reloadable_flags.h>
 #include <brpc/server.h>
-#include <bthread/bthread.h>
-#include <bthread/types.h>
-#include <butil/containers/flat_map.h>
-#include <butil/containers/flat_map_inl.h>
 #include <butil/endpoint.h>
 #include <butil/fd_utility.h>
-#include <butil/macros.h>

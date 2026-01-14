@@ -15,26 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
-#define DORIS_BE_SRC_COMMON_UTIL_HTTP_REQUEST_H
+#pragma once
 
 #include <glog/logging.h>
 
-#include <boost/algorithm/string.hpp>
+#include <future>
 #include <map>
+#include <memory>
 #include <string>
 
-#include "http/http_common.h"
-#include "http/http_headers.h"
+#include "common/config.h"
 #include "http/http_method.h"
 #include "util/string_util.h"
 
-struct mg_connection;
 struct evhttp_request;
 
 namespace doris {
 
 class HttpHandler;
+
+enum SendReplyType { REPLY_SYNC = 0, REPLY_ASYNC = 1 };
 
 class HttpRequest {
 public:
@@ -59,6 +59,8 @@ public:
     // return params
     const StringCaseUnorderedMap<std::string>& headers() { return _headers; }
 
+    std::string get_all_headers() const;
+
     // return params
     std::map<std::string, std::string>* params() { return &_params; }
 
@@ -73,19 +75,23 @@ public:
     void set_handler(HttpHandler* handler) { _handler = handler; }
     HttpHandler* handler() const { return _handler; }
 
-    struct evhttp_request* get_evhttp_request() const {
-        return _ev_req;
-    }
+    struct evhttp_request* get_evhttp_request() const { return _ev_req; }
 
-    void* handler_ctx() const { return _handler_ctx; }
-    void set_handler_ctx(void* ctx) {
+    std::shared_ptr<void> handler_ctx() const { return _handler_ctx; }
+    void set_handler_ctx(std::shared_ptr<void> ctx) {
         DCHECK(_handler != nullptr);
         _handler_ctx = ctx;
     }
 
     const char* remote_host() const;
 
+    void mark_send_reply(SendReplyType type = REPLY_ASYNC) { _send_reply_type = type; }
+
+    void finish_send_reply();
+    void wait_finish_send_reply();
+
 private:
+    SendReplyType _send_reply_type = REPLY_SYNC;
     HttpMethod _method;
     std::string _uri;
     std::string _raw_path;
@@ -97,10 +103,12 @@ private:
     struct evhttp_request* _ev_req = nullptr;
     HttpHandler* _handler = nullptr;
 
-    void* _handler_ctx = nullptr;
+    std::shared_ptr<void> _handler_ctx;
     std::string _request_body;
+
+    // ensure send_reply finished
+    std::promise<bool> _http_reply_promise;
+    std::future<bool> _http_reply_future = _http_reply_promise.get_future();
 };
 
 } // namespace doris
-
-#endif

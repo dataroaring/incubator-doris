@@ -20,16 +20,17 @@ package org.apache.doris.httpv2.rest;
 import org.apache.doris.alter.SystemHandler;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.Pair;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.system.Backend;
 import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.system.SystemInfoService.HostInfo;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
@@ -37,18 +38,15 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-
 /**
  * calc row count from replica to table
  * fe_host:fe_http_port/api/check_decommission?host_ports=host:port,host2:port2...
  * return:
  * {
- * 	"msg": "OK",
- * 	"code": 0,
- * 	"data": ["192.168.10.11:9050", "192.168.10.11:9050"],
- * 	"count": 0
+ * "msg": "OK",
+ * "code": 0,
+ * "data": ["192.168.10.11:9050", "192.168.10.11:9050"],
+ * "count": 0
  * }
  */
 @RestController
@@ -72,20 +70,20 @@ public class CheckDecommissionAction extends RestBaseController {
             return ResponseEntityBuilder.badRequest("No host:port specified");
         }
 
-        List<Pair<String, Integer>> hostPortPairs = Lists.newArrayList();
+        List<HostInfo> hostInfos = Lists.newArrayList();
         for (String hostPort : hostPortArr) {
-            Pair<String, Integer> pair;
             try {
-                pair = SystemInfoService.validateHostAndPort(hostPort);
+                HostInfo hostInfo = SystemInfoService.getHostAndPort(hostPort);
+                hostInfos.add(hostInfo);
             } catch (AnalysisException e) {
                 return ResponseEntityBuilder.badRequest(e.getMessage());
             }
-            hostPortPairs.add(pair);
         }
 
         try {
-            List<Backend> backends = SystemHandler.checkDecommission(hostPortPairs);
-            List<String> backendsList = backends.stream().map(b -> b.getHost() + ":" + b.getHeartbeatPort()).collect(Collectors.toList());
+            List<Backend> backends = SystemHandler.checkDecommission(hostInfos);
+            List<String> backendsList = backends.stream().map(b -> b.getHost() + ":"
+                    + b.getHeartbeatPort()).collect(Collectors.toList());
             return ResponseEntityBuilder.ok(backendsList);
         } catch (DdlException e) {
             return ResponseEntityBuilder.okWithCommonError(e.getMessage());

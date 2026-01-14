@@ -44,11 +44,11 @@ public class BackendReplicasInfo implements Writable {
     }
 
     public void addBadReplica(long tabletId) {
-        replicaReportInfos.add(new ReplicaReportInfo(tabletId, ReportInfoType.BAD));
+        replicaReportInfos.add(new ReplicaReportInfo(tabletId, -1, ReportInfoType.BAD));
     }
 
-    public void addMissingVersionReplica(long tabletId) {
-        replicaReportInfos.add(new ReplicaReportInfo(tabletId, ReportInfoType.MISSING_VERSION));
+    public void addMissingVersionReplica(long tabletId, long lastFailedVersion) {
+        replicaReportInfos.add(new ReplicaReportInfo(tabletId, lastFailedVersion, ReportInfoType.MISSING_VERSION));
     }
 
     public long getBackendId() {
@@ -79,26 +79,18 @@ public class BackendReplicasInfo implements Writable {
         MISSING_VERSION
     }
 
-    public static class ReplicaReportInfo implements Writable {
+    public static class ReplicaReportInfo {
         @SerializedName(value = "tabletId")
         public long tabletId;
         @SerializedName(value = "type")
         public ReportInfoType type;
+        @SerializedName(value = "lastFailedVersion")
+        public long lastFailedVersion;
 
-        public ReplicaReportInfo(long tabletId, ReportInfoType type) {
+        public ReplicaReportInfo(long tabletId, long lastFailedVersion, ReportInfoType type) {
             this.tabletId = tabletId;
+            this.lastFailedVersion = lastFailedVersion;
             this.type = type;
-        }
-
-        @Override
-        public void write(DataOutput out) throws IOException {
-            String json = GsonUtils.GSON.toJson(this);
-            Text.writeString(out, json);
-        }
-
-        public static ReplicaReportInfo read(DataInput in) throws IOException {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, ReplicaReportInfo.class);
         }
     }
 

@@ -18,12 +18,13 @@
 // https://github.com/ClickHouse/ClickHouse/blob/master/base/base/mremap.cpp
 // and modified by Doris
 
-#include <cstddef>
+#include "vec/common/mremap.h"
+
+// IWYU pragma: no_include <bthread/errno.h>
+#include <errno.h> // IWYU pragma: keep
+
 #include <cstdlib>
 #include <cstring>
-#include <errno.h>
-
-#include "vec/common/mremap.h"
 
 void* mremap_fallback(void* old_address, size_t old_size, size_t new_size, int flags, int mmap_prot,
                       int mmap_flags, int mmap_fd, off_t mmap_offset) {

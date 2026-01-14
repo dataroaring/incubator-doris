@@ -17,10 +17,13 @@
 
 #pragma once
 
+#include <gen_cpp/Descriptors_types.h>
+#include <gen_cpp/Types_types.h>
+
 #include <vector>
 
-#include "gen_cpp/Descriptors_types.h"
-#include "gen_cpp/Types_types.h"
+#include "runtime/define_primitive_type.h"
+#include "runtime/primitive_type.h"
 
 namespace doris {
 
@@ -37,6 +40,21 @@ public:
     void add_tuple(const TTupleDescriptor& tuple) { _desc_tbl.tupleDescriptors.push_back(tuple); }
 
     TDescriptorTable desc_tbl() { return _desc_tbl; }
+
+    TDescriptorTableBuilder& append_slotDescriptors(TSlotDescriptor& desc) {
+        _desc_tbl.slotDescriptors.push_back(desc);
+        return *this;
+    }
+    TDescriptorTableBuilder& append_tupleDescriptors(TTupleDescriptor& desc) {
+        _desc_tbl.tupleDescriptors.push_back(desc);
+        return *this;
+    }
+    TDescriptorTableBuilder& append_tableDescriptors(TTableDescriptor& desc) {
+        _desc_tbl.tableDescriptors.push_back(desc);
+        return *this;
+    }
+
+    TDescriptorTable& build() { return _desc_tbl; }
 
 private:
     TSlotId _next_slot_id = 0;
@@ -59,7 +77,7 @@ public:
         return type_desc;
     }
 
-    TSlotDescriptorBuilder() { _slot_desc.isMaterialized = true; }
+    TSlotDescriptorBuilder() = default;
     TSlotDescriptorBuilder& type(PrimitiveType type) {
         _slot_desc.slotType = get_common_type(to_thrift(type));
         return *this;
@@ -79,10 +97,6 @@ public:
         _slot_desc.nullIndicatorByte = (nullable) ? 0 : -1;
         return *this;
     }
-    TSlotDescriptorBuilder& is_materialized(bool is_materialized) {
-        _slot_desc.isMaterialized = is_materialized;
-        return *this;
-    }
     TSlotDescriptorBuilder& column_name(const std::string& name) {
         _slot_desc.colName = name;
         return *this;
@@ -92,6 +106,35 @@ public:
         return *this;
     }
     TSlotDescriptor build() { return _slot_desc; }
+
+    TSlotDescriptorBuilder& set_id(TTupleId id) {
+        _slot_desc.id = id;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_parent(TTupleDescriptor& parent) {
+        _slot_desc.parent = parent.id;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_slotType(TTypeDesc& slotType) {
+        _slot_desc.slotType = slotType;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_nullIndicatorBit(int nullIndicatorBit) {
+        _slot_desc.nullIndicatorBit = nullIndicatorBit;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_byteOffset(int byteOffset) {
+        _slot_desc.byteOffset = byteOffset;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_slotIdx(int slotIdx) {
+        _slot_desc.slotIdx = slotIdx;
+        return *this;
+    }
+    TSlotDescriptorBuilder& set_colName(std::string colName) {
+        _slot_desc.colName = colName;
+        return *this;
+    }
 
 private:
     friend TTupleDescriptorBuilder;
@@ -107,25 +150,11 @@ public:
     void build(TDescriptorTableBuilder* tb) {
         // build slot desc
         _tuple_id = tb->next_tuple_id();
-        int num_nullables = 0;
-        for (int i = 0; i < _slot_descs.size(); ++i) {
-            auto& slot_desc = _slot_descs[i];
-            if (slot_desc.nullIndicatorByte >= 0) {
-                num_nullables++;
-            }
-        }
-        int null_bytes = (num_nullables + 7) / 8;
-        int offset = null_bytes;
         int null_offset = 0;
         for (int i = 0; i < _slot_descs.size(); ++i) {
             auto& slot_desc = _slot_descs[i];
-            int size = get_slot_size(thrift_to_type(slot_desc.slotType.types[0].scalar_type.type));
-            int align = (size > 16) ? 16 : size;
-            offset = ((offset + align - 1) / align) * align;
             slot_desc.id = tb->next_slot_id();
             slot_desc.parent = _tuple_id;
-            slot_desc.byteOffset = offset;
-            offset += size;
             if (slot_desc.nullIndicatorByte >= 0) {
                 slot_desc.nullIndicatorBit = null_offset % 8;
                 slot_desc.nullIndicatorByte = null_offset / 8;
@@ -138,13 +167,21 @@ public:
         }
 
         _tuple_desc.id = _tuple_id;
-        _tuple_desc.byteSize = offset;
-        _tuple_desc.numNullBytes = null_bytes;
+        // Useless not set it.
+        _tuple_desc.byteSize = 0;
+        _tuple_desc.numNullBytes = 0;
         _tuple_desc.numNullSlots = _slot_descs.size();
 
         tb->add_slots(_slot_descs);
         tb->add_tuple(_tuple_desc);
     }
+
+    TTupleDescriptorBuilder& set_id(TTupleId id) {
+        _tuple_desc.id = id;
+        return *this;
+    }
+
+    TTupleDescriptor& build() { return _tuple_desc; }
 
 private:
     TTupleId _tuple_id;

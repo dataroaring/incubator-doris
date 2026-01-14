@@ -20,31 +20,30 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ref_counter.hpp>
+#include <atomic>
 #include <initializer_list>
+#include <type_traits>
+#include <vector>
+
+namespace doris {
+#include "common/compile_check_begin.h"
 
 /** Copy-on-write shared ptr.
   * Allows to work with shared immutable objects and sometimes unshare and mutate you own unique copy.
   *
   * Usage:
-
     class Column : public COW<Column>
     {
     private:
         friend class COW<Column>;
-
-        /// Leave all constructors in private section. They will be avaliable through 'create' method.
+        /// Leave all constructors in private section. They will be available through 'create' method.
         Column();
-
         /// Provide 'clone' method. It can be virtual if you want polymorphic behaviour.
         virtual Column * clone() const;
     public:
         /// Correctly use const qualifiers in your interface.
-
         virtual ~Column() {}
     };
-
   * It will provide 'create' and 'mutate' methods.
   * And 'Ptr' and 'MutablePtr' types.
   * Ptr is refcounted pointer to immutable object.
@@ -63,9 +62,7 @@
     Column::Ptr x = Column::create(1);
     /// Sharing single immutable object in two ptrs.
     Column::Ptr y = x;
-
     /// Now x and y are shared.
-
     /// Change value of x.
     {
         /// Creating mutable ptr. It can clone an object under the hood if it was shared.
@@ -75,9 +72,7 @@
         /// Assigning pointer 'x' to mutated object.
         x = std::move(mutate_x);
     }
-
     /// Now x and y are unshared and have different values.
-
   * Note. You may have heard that COW is bad practice.
   * Actually it is, if your values are small or if copying is done implicitly.
   * This is the case for string implementations.
@@ -120,20 +115,28 @@ protected:
         intrusive_ptr() : t(nullptr) {}
 
         intrusive_ptr(T* t, bool add_ref = true) : t(t) {
-            if (t && add_ref) ((std::remove_const_t<T>*)t)->add_ref();
+            if (t && add_ref) {
+                ((std::remove_const_t<T>*)t)->add_ref();
+            }
         }
 
         template <typename U>
         intrusive_ptr(intrusive_ptr<U> const& rhs) : t(rhs.get()) {
-            if (t) ((std::remove_const_t<T>*)t)->add_ref();
+            if (t) {
+                ((std::remove_const_t<T>*)t)->add_ref();
+            }
         }
 
         intrusive_ptr(intrusive_ptr const& rhs) : t(rhs.get()) {
-            if (t) ((std::remove_const_t<T>*)t)->add_ref();
+            if (t) {
+                ((std::remove_const_t<T>*)t)->add_ref();
+            }
         }
 
         ~intrusive_ptr() {
-            if (t) ((std::remove_const_t<T>*)t)->release_ref();
+            if (t) {
+                ((std::remove_const_t<T>*)t)->release_ref();
+            }
         }
 
         template <typename U>
@@ -141,19 +144,9 @@ protected:
             intrusive_ptr(rhs).swap(*this);
             return *this;
         }
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wuninitialized"
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
+
         intrusive_ptr(intrusive_ptr&& rhs) : t(rhs.t) { rhs.t = nullptr; }
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic pop
-#endif
+
         intrusive_ptr& operator=(intrusive_ptr&& rhs) {
             intrusive_ptr(static_cast<intrusive_ptr&&>(rhs)).swap(*this);
             return *this;
@@ -211,10 +204,8 @@ protected:
 
         operator bool() const { return t != nullptr; }
 
-        operator T*() const { return t; }
-
     private:
-        T* t;
+        T* t = nullptr;
     };
 
 protected:
@@ -313,10 +304,11 @@ public:
 
 protected:
     MutablePtr shallow_mutate() const {
-        if (this->use_count() > 1)
+        if (this->use_count() > 1) {
             return derived()->clone();
-        else
+        } else {
             return assume_mutable();
+        }
     }
 
 public:
@@ -350,11 +342,11 @@ protected:
         const T& operator*() const { return *value; }
         T& operator*() { return value->assume_mutable_ref(); }
 
-        operator const immutable_ptr<T> &() const { return value; }
-        operator immutable_ptr<T> &() { return value; }
+        operator const immutable_ptr<T>&() const { return value; }
+        operator immutable_ptr<T>&() { return value; }
 
-        operator bool() const { return value != nullptr; }
-        bool operator!() const { return value == nullptr; }
+        operator bool() const { return value.get() != nullptr; }
+        bool operator!() const { return value.get() == nullptr; }
 
         bool operator==(const chameleon_ptr& rhs) const { return value == rhs.value; }
         bool operator!=(const chameleon_ptr& rhs) const { return value != rhs.value; }
@@ -402,19 +394,52 @@ public:
   *
   * See example in "cow_columns.cpp".
   */
+namespace vectorized {
+class IColumn;
+}
 template <typename Base, typename Derived>
 class COWHelper : public Base {
 public:
+    static_assert(std::is_base_of_v<doris::vectorized::IColumn, Base>,
+                  "COWHelper only use in IColumn");
     using Ptr = typename Base::template immutable_ptr<Derived>;
     using MutablePtr = typename Base::template mutable_ptr<Derived>;
 
+#include "common/compile_check_avoid_begin.h"
+    //This code uses templates, and errors like the following are likely to occur, mainly due to literal type mismatches:
+    // be/src/vec/common/cow.h:409:39: warning: implicit conversion loses integer precision: 'int' to 'value_type' (aka 'unsigned char') [-Wimplicit-int-conversion]
+    //   409 |         return MutablePtr(new Derived(std::forward<Args>(args)...));
+    //       |                               ~~~~~~~ ^~~~~~~~~~~~~~~~~~~~~~~~
+    // ColumnPtr res_data_column = ColumnUInt8::create(1, 1);
     template <typename... Args>
     static MutablePtr create(Args&&... args) {
         return MutablePtr(new Derived(std::forward<Args>(args)...));
     }
+#include "common/compile_check_avoid_end.h"
+
+    static Ptr cast_to_column_ptr(const Derived* raw_type_ptr) { return Ptr(raw_type_ptr); }
+
+    static MutablePtr cast_to_column_mutptr(Derived* raw_type_ptr) {
+        return MutablePtr(raw_type_ptr);
+    }
 
     typename Base::MutablePtr clone() const override {
         return typename Base::MutablePtr(new Derived(static_cast<const Derived&>(*this)));
+    }
+    void append_data_by_selector(typename Base::MutablePtr& res,
+                                 const typename Base::Selector& selector) const override {
+        this->template append_data_by_selector_impl<Derived>(res, selector);
+    }
+
+    void append_data_by_selector(typename Base::MutablePtr& res,
+                                 const typename Base::Selector& selector, size_t begin,
+                                 size_t end) const override {
+        this->template append_data_by_selector_impl<Derived>(res, selector, begin, end);
+    }
+
+    void insert_from_multi_column(const std::vector<const vectorized::IColumn*>& srcs,
+                                  const std::vector<size_t>& positions) override {
+        this->template insert_from_multi_column_impl<Derived>(srcs, positions);
     }
 
 protected:
@@ -422,3 +447,5 @@ protected:
         return MutablePtr(static_cast<Derived*>(Base::shallow_mutate().get()));
     }
 };
+#include "common/compile_check_end.h"
+} // namespace doris

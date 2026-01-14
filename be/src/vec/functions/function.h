@@ -20,22 +20,74 @@
 
 #pragma once
 
-#include <memory>
+#include <fmt/format.h>
+#include <glog/logging.h>
 
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include "common/exception.h"
+#include "common/logging.h"
 #include "common/status.h"
+#include "olap/rowset/segment_v2/inverted_index_iterator.h" // IWYU pragma: keep
+#include "runtime/define_primitive_type.h"
+#include "udf/udf.h"
 #include "vec/core/block.h"
 #include "vec/core/column_numbers.h"
-#include "vec/core/names.h"
+#include "vec/core/column_with_type_and_name.h"
+#include "vec/core/columns_with_type_and_name.h"
+#include "vec/core/types.h"
 #include "vec/data_types/data_type.h"
+#include "vec/data_types/data_type_array.h"
+#include "vec/data_types/data_type_map.h"
+#include "vec/data_types/data_type_nullable.h"
+#include "vec/data_types/data_type_struct.h"
+
+namespace doris {
+struct InvertedIndexAnalyzerCtx;
+} // namespace doris
 
 namespace doris::vectorized {
 
+struct FunctionAttr {
+    bool new_version_unix_timestamp {false};
+};
+
+#define RETURN_REAL_TYPE_FOR_DATEV2_FUNCTION(TYPE)                                             \
+    bool is_nullable = false;                                                                  \
+    bool is_datev2 = false;                                                                    \
+    for (auto it : arguments) {                                                                \
+        is_nullable = is_nullable || it.type->is_nullable();                                   \
+        is_datev2 = is_datev2 || it.type->get_primitive_type() == TYPE_DATEV2 ||               \
+                    it.type->get_primitive_type() == TYPE_DATETIMEV2;                          \
+    }                                                                                          \
+    return is_nullable || !is_datev2                                                           \
+                   ? make_nullable(                                                            \
+                             std::make_shared<typename PrimitiveTypeTraits<TYPE>::DataType>()) \
+                   : std::make_shared<typename PrimitiveTypeTraits<TYPE>::DataType>();
+
+#define SET_NULLMAP_IF_FALSE(EXPR) \
+    if (!EXPR) [[unlikely]] {      \
+        null_map[i] = true;        \
+    }
+
 class Field;
+class VExpr;
 
 // Only use dispose the variadic argument
 template <typename T>
 auto has_variadic_argument_types(T&& arg) -> decltype(T::get_variadic_argument_types()) {};
 void has_variadic_argument_types(...);
+
+template <typename T>
+concept HasGetVariadicArgumentTypesImpl = requires(T t) {
+    { t.get_variadic_argument_types_impl() } -> std::same_as<DataTypes>;
+};
+
+bool have_null_column(const Block& block, const ColumnNumbers& args);
+bool have_null_column(const ColumnsWithTypeAndName& args);
 
 /// The simplest executable object.
 /// Motivation:
@@ -49,7 +101,7 @@ public:
     virtual String get_name() const = 0;
 
     virtual Status execute(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                           size_t result, size_t input_rows_count, bool dry_run) = 0;
+                           uint32_t result, size_t input_rows_count) const = 0;
 };
 
 using PreparedFunctionPtr = std::shared_ptr<IPreparedFunction>;
@@ -57,18 +109,25 @@ using PreparedFunctionPtr = std::shared_ptr<IPreparedFunction>;
 class PreparedFunctionImpl : public IPreparedFunction {
 public:
     Status execute(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                   size_t result, size_t input_rows_count, bool dry_run = false) final;
+                   uint32_t result, size_t input_rows_count) const final;
+
+    /** If the function have non-zero number of arguments,
+      *  and if all arguments are constant, that we could automatically provide default implementation:
+      *  arguments are converted to ordinary columns with single value which is not const, then function is executed as usual,
+      *  and then the result is converted to constant column.
+      */
+    virtual bool use_default_implementation_for_constants() const { return true; }
+
+    /** If use_default_implementation_for_nulls() is true, after execute the function,
+      * whether need to replace the nested data of null data to the default value.
+      * E.g. for binary arithmetic exprs, need return true to avoid false overflow.
+      */
+    virtual bool need_replace_null_data_to_default() const { return false; }
 
 protected:
-    virtual Status execute_impl_dry_run(FunctionContext* context, Block& block,
-                                        const ColumnNumbers& arguments, size_t result,
-                                        size_t input_rows_count) {
-        return execute_impl(context, block, arguments, result, input_rows_count);
-    }
-
     virtual Status execute_impl(FunctionContext* context, Block& block,
-                                const ColumnNumbers& arguments, size_t result,
-                                size_t input_rows_count) = 0;
+                                const ColumnNumbers& arguments, uint32_t result,
+                                size_t input_rows_count) const = 0;
 
     /** Default implementation in presence of Nullable arguments or NULL constants as arguments is the following:
       *  if some of arguments are NULL constants then return NULL constant,
@@ -78,39 +137,26 @@ protected:
       */
     virtual bool use_default_implementation_for_nulls() const { return true; }
 
-    /** If the function have non-zero number of arguments,
-      *  and if all arguments are constant, that we could automatically provide default implementation:
-      *  arguments are converted to ordinary columns with single value, then function is executed as usual,
-      *  and then the result is converted to constant column.
-      */
-    virtual bool use_default_implementation_for_constants() const { return false; }
-
-    /** If function arguments has single low cardinality column and all other arguments are constants, call function on nested column.
-      * Otherwise, convert all low cardinality columns to ordinary columns.
-      * Returns ColumnLowCardinality if at least one argument is ColumnLowCardinality.
-      */
-    virtual bool use_default_implementation_for_low_cardinality_columns() const { return true; }
+    virtual bool skip_return_type_check() const { return false; }
 
     /** Some arguments could remain constant during this implementation.
+      * Every argument required const must write here and no checks elsewhere.
       */
     virtual ColumnNumbers get_arguments_that_are_always_constant() const { return {}; }
 
-    /** True if function can be called on default arguments (include Nullable's) and won't throw.
-      * Counterexample: modulo(0, 0)
-      */
-    virtual bool can_be_executed_on_default_arguments() const { return true; }
-
 private:
     Status default_implementation_for_nulls(FunctionContext* context, Block& block,
-                                            const ColumnNumbers& args, size_t result,
-                                            size_t input_rows_count, bool dry_run, bool* executed);
+                                            const ColumnNumbers& args, uint32_t result,
+                                            size_t input_rows_count, bool* executed) const;
     Status default_implementation_for_constant_arguments(FunctionContext* context, Block& block,
-                                                         const ColumnNumbers& args, size_t result,
-                                                         size_t input_rows_count, bool dry_run,
-                                                         bool* executed);
-    Status execute_without_low_cardinality_columns(FunctionContext* context, Block& block,
-                                                   const ColumnNumbers& arguments, size_t result,
-                                                   size_t input_rows_count, bool dry_run);
+                                                         const ColumnNumbers& args, uint32_t result,
+                                                         size_t input_rows_count,
+                                                         bool* executed) const;
+    Status default_execute(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
+                           uint32_t result, size_t input_rows_count) const;
+    Status _execute_skipped_constant_deal(FunctionContext* context, Block& block,
+                                          const ColumnNumbers& args, uint32_t result,
+                                          size_t input_rows_count) const;
 };
 
 /// Function with known arguments and return type.
@@ -127,19 +173,31 @@ public:
     /// Do preparations and return executable.
     /// sample_block should contain data types of arguments and values of constants, if relevant.
     virtual PreparedFunctionPtr prepare(FunctionContext* context, const Block& sample_block,
-                                        const ColumnNumbers& arguments, size_t result) const = 0;
+                                        const ColumnNumbers& arguments, uint32_t result) const = 0;
 
     /// Override this when function need to store state in the `FunctionContext`, or do some
     /// preparation work according to information from `FunctionContext`.
-    virtual Status prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+    virtual Status open(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
         return Status::OK();
     }
 
-    /// TODO: make const
-    virtual Status execute(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                           size_t result, size_t input_rows_count, bool dry_run = false) {
-        return prepare(context, block, arguments, result)
-                ->execute(context, block, arguments, result, input_rows_count, dry_run);
+    Status execute(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
+                   uint32_t result, size_t input_rows_count) const {
+        try {
+            return prepare(context, block, arguments, result)
+                    ->execute(context, block, arguments, result, input_rows_count);
+        } catch (const Exception& e) {
+            return e.to_status();
+        }
+    }
+
+    virtual Status evaluate_inverted_index(
+            const ColumnsWithTypeAndName& arguments,
+            const std::vector<vectorized::IndexFieldNameAndTypePair>& data_type_with_names,
+            std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+            const InvertedIndexAnalyzerCtx* analyzer_ctx,
+            segment_v2::InvertedIndexResultBitmap& bitmap_result) const {
+        return Status::OK();
     }
 
     /// Do cleaning work when function is finished, i.e., release state variables in the
@@ -148,91 +206,13 @@ public:
         return Status::OK();
     }
 
-    virtual bool is_stateful() const { return false; }
+    virtual bool is_use_default_implementation_for_constants() const = 0;
 
-    /** Should we evaluate this function while constant folding, if arguments are constants?
-      * Usually this is true. Notable counterexample is function 'sleep'.
-      * If we will call it during query analysis, we will sleep extra amount of time.
-      */
-    virtual bool is_suitable_for_constant_folding() const { return true; }
+    virtual bool is_udf_function() const { return false; }
 
-    /** Some functions like ignore(...) or toTypeName(...) always return constant result which doesn't depend on arguments.
-      * In this case we can calculate result and assume that it's constant in stream header.
-      * There is no need to implement function if it has zero arguments.
-      * Must return ColumnConst with single row or nullptr.
-      */
-    virtual ColumnPtr get_result_if_always_returns_constant_and_has_arguments(
-            const Block& /*block*/, const ColumnNumbers& /*arguments*/) const {
-        return nullptr;
-    }
+    virtual bool can_push_down_to_index() const { return false; }
 
-    /** Function is called "injective" if it returns different result for different values of arguments.
-      * Example: hex, negate, tuple...
-      *
-      * Function could be injective with some arguments fixed to some constant values.
-      * Examples:
-      *  plus(const, x);
-      *  multiply(const, x) where x is an integer and constant is not divisible by two;
-      *  concat(x, 'const');
-      *  concat(x, 'const', y) where const contain at least one non-numeric character;
-      *  concat with FixedString
-      *  dictGet... functions takes name of dictionary as its argument,
-      *   and some dictionaries could be explicitly defined as injective.
-      *
-      * It could be used, for example, to remove useless function applications from GROUP BY.
-      *
-      * Sometimes, function is not really injective, but considered as injective, for purpose of query optimization.
-      * For example, to_string function is not injective for Float64 data type,
-      *  as it returns 'nan' for many different representation of NaNs.
-      * But we assume, that it is injective. This could be documented as implementation-specific behaviour.
-      *
-      * sample_block should contain data types of arguments and values of constants, if relevant.
-      */
-    virtual bool get_is_injective(const Block& /*sample_block*/) { return false; }
-
-    /** Function is called "deterministic", if it returns same result for same values of arguments.
-      * Most of functions are deterministic. Notable counterexample is rand().
-      * Sometimes, functions are "deterministic" in scope of single query
-      *  (even for distributed query), but not deterministic it general.
-      * Example: now(). Another example: functions that work with periodically updated dictionaries.
-      */
-
-    virtual bool is_deterministic() const = 0;
-
-    virtual bool is_deterministic_in_scope_of_query() const = 0;
-
-    /** Lets you know if the function is monotonic in a range of values.
-      * This is used to work with the index in a sorted chunk of data.
-      * And allows to use the index not only when it is written, for example `date >= const`, but also, for example, `toMonth(date) >= 11`.
-      * All this is considered only for functions of one argument.
-      */
-    virtual bool has_information_about_monotonicity() const { return false; }
-
-    /// The property of monotonicity for a certain range.
-    struct Monotonicity {
-        bool is_monotonic = false; /// Is the function monotonous (nondecreasing or nonincreasing).
-        bool is_positive =
-                true; /// true if the function is nondecreasing, false, if notincreasing. If is_monotonic = false, then it does not matter.
-        bool is_always_monotonic =
-                false; /// Is true if function is monotonic on the whole input range I
-
-        Monotonicity(bool is_monotonic_ = false, bool is_positive_ = true,
-                     bool is_always_monotonic_ = false)
-                : is_monotonic(is_monotonic_),
-                  is_positive(is_positive_),
-                  is_always_monotonic(is_always_monotonic_) {}
-    };
-
-    /** Get information about monotonicity on a range of values. Call only if hasInformationAboutMonotonicity.
-      * NULL can be passed as one of the arguments. This means that the corresponding range is unlimited on the left or on the right.
-      */
-    virtual Monotonicity get_monotonicity_for_range(const IDataType& /*type*/,
-                                                    const Field& /*left*/,
-                                                    const Field& /*right*/) const {
-        LOG(FATAL) << fmt::format("Function {} has no information about its monotonicity.",
-                                  get_name());
-        return Monotonicity {};
-    }
+    virtual bool is_blockable() const { return false; }
 };
 
 using FunctionBasePtr = std::shared_ptr<IFunctionBase>;
@@ -245,15 +225,9 @@ public:
     /// Get the main function name.
     virtual String get_name() const = 0;
 
-    /// See the comment for the same method in IFunctionBase
-    virtual bool is_deterministic() const = 0;
-
-    virtual bool is_deterministic_in_scope_of_query() const = 0;
-
-    /// Override and return true if function needs to depend on the state of the data.
-    virtual bool is_stateful() const = 0;
-
     /// Override and return true if function could take different number of arguments.
+    ///TODO: this function is not actually used now. but in check_number_of_arguments we still need it because for many
+    /// functions we didn't set the correct number of arguments.
     virtual bool is_variadic() const = 0;
 
     /// For non-variadic functions, return number of arguments; otherwise return zero (that should be ignored).
@@ -273,45 +247,66 @@ public:
 
     /// Returns indexes of arguments, that must be ColumnConst
     virtual ColumnNumbers get_arguments_that_are_always_constant() const = 0;
-    /// Returns indexes if arguments, that can be Nullable without making result of function Nullable
-    /// (for functions like is_null(x))
-    virtual ColumnNumbers get_arguments_that_dont_imply_nullable_return_type(
-            size_t number_of_arguments) const = 0;
 };
 
 using FunctionBuilderPtr = std::shared_ptr<IFunctionBuilder>;
 
+inline std::string get_types_string(const ColumnsWithTypeAndName& arguments) {
+    std::string types;
+    for (const auto& argument : arguments) {
+        if (!types.empty()) {
+            types += ", ";
+        }
+        types += argument.type->get_name();
+    }
+    return types;
+}
+
+/// used in function_factory. when we register a function, save a builder. to get a function, to get a builder.
+/// will use DefaultFunctionBuilder as the default builder in function's registration if we didn't explicitly specify.
 class FunctionBuilderImpl : public IFunctionBuilder {
 public:
     FunctionBasePtr build(const ColumnsWithTypeAndName& arguments,
                           const DataTypePtr& return_type) const final {
+        if (skip_return_type_check()) {
+            return build_impl(arguments, return_type);
+        }
         const DataTypePtr& func_return_type = get_return_type(arguments);
-        DCHECK(return_type->equals(*func_return_type) ||
-               // For null constant argument, `get_return_type` would return
-               // Nullable<DataTypeNothing> when `use_default_implementation_for_nulls` is true.
-               (return_type->is_nullable() && func_return_type->is_nullable() &&
-                is_nothing(((DataTypeNullable*)func_return_type.get())->get_nested_type())) ||
-               (is_date_or_datetime(
-                        return_type->is_nullable()
-                                ? ((DataTypeNullable*)return_type.get())->get_nested_type()
-                                : return_type) &&
-                is_date_or_datetime(get_return_type(arguments)->is_nullable()
-                                            ? ((DataTypeNullable*)get_return_type(arguments).get())
-                                                      ->get_nested_type()
-                                            : get_return_type(arguments))))
-                << " with " << return_type->get_name() << " and " << func_return_type->get_name();
+        if (func_return_type == nullptr) {
+            throw doris::Exception(
+                    ErrorCode::INTERNAL_ERROR,
+                    "function return type check failed, function_name={}, "
+                    "expect_return_type={}, real_return_type is nullptr, input_arguments={}",
+                    get_name(), return_type->get_name(), get_types_string(arguments));
+        }
 
+        // check return types equal.
+        if (!(return_type->equals(*func_return_type) ||
+              // For null constant argument, `get_return_type` would return
+              // Nullable<DataTypeNothing> when `use_default_implementation_for_nulls` is true.
+              (return_type->is_nullable() && func_return_type->is_nullable() &&
+               ((DataTypeNullable*)func_return_type.get())
+                               ->get_nested_type()
+                               ->get_primitive_type() == INVALID_TYPE) ||
+              is_date_or_datetime_or_decimal(return_type, func_return_type) ||
+              is_nested_type_date_or_datetime_or_decimal(return_type, func_return_type))) {
+            throw doris::Exception(
+                    ErrorCode::INTERNAL_ERROR,
+                    "function return type check failed, function_name={}, "
+                    "fe plan return type={},  be real return type={}, input_arguments={}",
+                    get_name(), return_type->get_name(), func_return_type->get_name(),
+                    get_types_string(arguments));
+        }
         return build_impl(arguments, return_type);
     }
 
-    bool is_deterministic() const override { return true; }
-    bool is_deterministic_in_scope_of_query() const override { return true; }
-    bool is_stateful() const override { return false; }
     bool is_variadic() const override { return false; }
 
-    /// Default implementation. Will check only in non-variadic case.
+    // Default implementation. Will check only in non-variadic case.
     void check_number_of_arguments(size_t number_of_arguments) const override;
-
+    // the return type should be same with what FE plans.
+    // it returns: `get_return_type_impl` if `use_default_implementation_for_nulls` = false
+    //  `get_return_type_impl` warpped in NULL if `use_default_implementation_for_nulls` = true and input has NULL
     DataTypePtr get_return_type(const ColumnsWithTypeAndName& arguments) const;
 
     DataTypes get_variadic_argument_types() const override {
@@ -319,22 +314,22 @@ public:
     }
 
     ColumnNumbers get_arguments_that_are_always_constant() const override { return {}; }
-    ColumnNumbers get_arguments_that_dont_imply_nullable_return_type(
-            size_t /*number_of_arguments*/) const override {
-        return {};
-    }
 
 protected:
-    /// Get the result type by argument type. If the function does not apply to these arguments, throw an exception.
+    // Get the result type by argument type. If the function does not apply to these arguments, throw an exception.
+    // the get_return_type_impl and its overrides should only return the nested type if `use_default_implementation_for_nulls` is true.
+    // whether to wrap in nullable type will be automatically decided.
     virtual DataTypePtr get_return_type_impl(const ColumnsWithTypeAndName& arguments) const {
         DataTypes data_types(arguments.size());
-        for (size_t i = 0; i < arguments.size(); ++i) data_types[i] = arguments[i].type;
-
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            data_types[i] = arguments[i].type;
+        }
         return get_return_type_impl(data_types);
     }
 
     virtual DataTypePtr get_return_type_impl(const DataTypes& /*arguments*/) const {
-        LOG(FATAL) << fmt::format("get_return_type is not implemented for {}", get_name());
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
+                               "get_return_type is not implemented for {}", get_name());
         return nullptr;
     }
 
@@ -342,29 +337,27 @@ protected:
       *  if some of arguments are Nullable(Nothing) then don't call get_return_type(), call build_impl() with return_type = Nullable(Nothing),
       *  if some of arguments are Nullable, then:
       *   - Nullable types are substituted with nested types for get_return_type() function
-      *   - wrap get_return_type() result in Nullable type and pass to build_impl
+      *   - WRAP get_return_type() RESULT IN NULLABLE type and pass to build_impl
       *
       * Otherwise build returns build_impl(arguments, get_return_type(arguments));
       */
     virtual bool use_default_implementation_for_nulls() const { return true; }
 
-    /** If use_default_implementation_for_nulls() is true, than change arguments for get_return_type() and build_impl().
-      * If function arguments has low cardinality types, convert them to ordinary types.
-      * get_return_type returns ColumnLowCardinality if at least one argument type is ColumnLowCardinality.
-      */
-    virtual bool use_default_implementation_for_low_cardinality_columns() const { return true; }
+    virtual bool skip_return_type_check() const { return false; }
 
-    /// If it isn't, will convert all ColumnLowCardinality arguments to full columns.
-    virtual bool can_be_executed_on_low_cardinality_dictionary() const { return true; }
+    virtual bool need_replace_null_data_to_default() const { return false; }
 
+    /// return a real function object to execute. called in build(...).
     virtual FunctionBasePtr build_impl(const ColumnsWithTypeAndName& arguments,
                                        const DataTypePtr& return_type) const = 0;
 
-    virtual DataTypes get_variadic_argument_types_impl() const { return DataTypes(); }
+    virtual DataTypes get_variadic_argument_types_impl() const { return {}; }
 
 private:
-    DataTypePtr get_return_type_without_low_cardinality(
-            const ColumnsWithTypeAndName& arguments) const;
+    bool is_date_or_datetime_or_decimal(const DataTypePtr& return_type,
+                                        const DataTypePtr& func_return_type) const;
+    bool is_nested_type_date_or_datetime_or_decimal(const DataTypePtr& return_type,
+                                                    const DataTypePtr& func_return_type) const;
 };
 
 /// Previous function interface.
@@ -375,26 +368,25 @@ class IFunction : public std::enable_shared_from_this<IFunction>,
 public:
     String get_name() const override = 0;
 
-    bool is_stateful() const override { return false; }
-
-    /// TODO: make const
+    /// Notice: We should not change the column in the block, because the column may be shared by multiple expressions or exec nodes.
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) override = 0;
+                        uint32_t result, size_t input_rows_count) const override = 0;
 
     /// Override this functions to change default implementation behavior. See details in IMyFunction.
     bool use_default_implementation_for_nulls() const override { return true; }
-    bool use_default_implementation_for_constants() const override { return false; }
-    bool use_default_implementation_for_low_cardinality_columns() const override { return true; }
+
+    bool skip_return_type_check() const override { return false; }
+
+    bool need_replace_null_data_to_default() const override { return false; }
+
+    /// all constancy check should use this function to do automatically
     ColumnNumbers get_arguments_that_are_always_constant() const override { return {}; }
-    bool can_be_executed_on_default_arguments() const override { return true; }
-    bool can_be_executed_on_low_cardinality_dictionary() const override {
-        return is_deterministic_in_scope_of_query();
+
+    bool is_use_default_implementation_for_constants() const override {
+        return use_default_implementation_for_constants();
     }
-    bool is_deterministic() const override { return true; }
-    bool is_deterministic_in_scope_of_query() const override { return true; }
 
     using PreparedFunctionImpl::execute;
-    using PreparedFunctionImpl::execute_impl_dry_run;
     using FunctionBuilderImpl::get_return_type_impl;
     using FunctionBuilderImpl::get_variadic_argument_types_impl;
     using FunctionBuilderImpl::get_return_type;
@@ -402,72 +394,43 @@ public:
     [[noreturn]] PreparedFunctionPtr prepare(FunctionContext* context,
                                              const Block& /*sample_block*/,
                                              const ColumnNumbers& /*arguments*/,
-                                             size_t /*result*/) const final {
-        LOG(FATAL) << "prepare is not implemented for IFunction";
+                                             uint32_t /*result*/) const final {
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
+                               "prepare is not implemented for IFunction {}", get_name());
         __builtin_unreachable();
     }
 
-    Status prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
+    Status open(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
         return Status::OK();
     }
 
     [[noreturn]] const DataTypes& get_argument_types() const final {
-        LOG(FATAL) << "get_argument_types is not implemented for IFunction";
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
+                               "get_argument_types is not implemented for IFunction {}",
+                               get_name());
         __builtin_unreachable();
     }
 
     [[noreturn]] const DataTypePtr& get_return_type() const final {
-        LOG(FATAL) << "get_return_type is not implemented for IFunction";
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
+                               "get_return_type is not implemented for IFunction {}", get_name());
         __builtin_unreachable();
     }
 
 protected:
     FunctionBasePtr build_impl(const ColumnsWithTypeAndName& /*arguments*/,
                                const DataTypePtr& /*return_type*/) const final {
-        LOG(FATAL) << "build_impl is not implemented for IFunction";
+        throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
+                               "build_impl is not implemented for IFunction {}", get_name());
+        __builtin_unreachable();
         return {};
     }
 };
 
-/// Wrappers over IFunction.
-
-class DefaultExecutable final : public PreparedFunctionImpl {
-public:
-    explicit DefaultExecutable(std::shared_ptr<IFunction> function_)
-            : function(std::move(function_)) {}
-
-    String get_name() const override { return function->get_name(); }
-
-protected:
-    Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) final {
-        return function->execute_impl(context, block, arguments, result, input_rows_count);
-    }
-    Status execute_impl_dry_run(FunctionContext* context, Block& block,
-                                const ColumnNumbers& arguments, size_t result,
-                                size_t input_rows_count) final {
-        return function->execute_impl_dry_run(context, block, arguments, result, input_rows_count);
-    }
-    bool use_default_implementation_for_nulls() const final {
-        return function->use_default_implementation_for_nulls();
-    }
-    bool use_default_implementation_for_constants() const final {
-        return function->use_default_implementation_for_constants();
-    }
-    bool use_default_implementation_for_low_cardinality_columns() const final {
-        return function->use_default_implementation_for_low_cardinality_columns();
-    }
-    ColumnNumbers get_arguments_that_are_always_constant() const final {
-        return function->get_arguments_that_are_always_constant();
-    }
-    bool can_be_executed_on_default_arguments() const override {
-        return function->can_be_executed_on_default_arguments();
-    }
-
-private:
-    std::shared_ptr<IFunction> function;
-};
-
+/*
+ * when we register a function which didn't specify its base(i.e. inherited from IFunction), actually we use this as a wrapper.
+ * it saves real implementation as `function`. 
+*/
 class DefaultFunction final : public IFunctionBase {
 public:
     DefaultFunction(std::shared_ptr<IFunction> function_, DataTypes arguments_,
@@ -481,46 +444,38 @@ public:
     const DataTypes& get_argument_types() const override { return arguments; }
     const DataTypePtr& get_return_type() const override { return return_type; }
 
+    // return a default wrapper for IFunction.
     PreparedFunctionPtr prepare(FunctionContext* context, const Block& /*sample_block*/,
                                 const ColumnNumbers& /*arguments*/,
-                                size_t /*result*/) const override {
-        return std::make_shared<DefaultExecutable>(function);
+                                uint32_t /*result*/) const override {
+        return function;
     }
 
-    Status prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
-        return function->prepare(context, scope);
+    Status open(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
+        return function->open(context, scope);
     }
 
     Status close(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
         return function->close(context, scope);
     }
 
-    bool is_suitable_for_constant_folding() const override {
-        return function->is_suitable_for_constant_folding();
-    }
-    ColumnPtr get_result_if_always_returns_constant_and_has_arguments(
-            const Block& block, const ColumnNumbers& arguments_) const override {
-        return function->get_result_if_always_returns_constant_and_has_arguments(block, arguments_);
-    }
-
-    bool get_is_injective(const Block& sample_block) override {
-        return function->get_is_injective(sample_block);
+    Status evaluate_inverted_index(
+            const ColumnsWithTypeAndName& args,
+            const std::vector<vectorized::IndexFieldNameAndTypePair>& data_type_with_names,
+            std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+            const InvertedIndexAnalyzerCtx* analyzer_ctx,
+            segment_v2::InvertedIndexResultBitmap& bitmap_result) const override {
+        return function->evaluate_inverted_index(args, data_type_with_names, iterators, num_rows,
+                                                 analyzer_ctx, bitmap_result);
     }
 
-    bool is_deterministic() const override { return function->is_deterministic(); }
-
-    bool is_deterministic_in_scope_of_query() const override {
-        return function->is_deterministic_in_scope_of_query();
+    bool is_use_default_implementation_for_constants() const override {
+        return function->is_use_default_implementation_for_constants();
     }
 
-    bool has_information_about_monotonicity() const override {
-        return function->has_information_about_monotonicity();
-    }
+    bool can_push_down_to_index() const override { return function->can_push_down_to_index(); }
 
-    IFunctionBase::Monotonicity get_monotonicity_for_range(const IDataType& type, const Field& left,
-                                                           const Field& right) const override {
-        return function->get_monotonicity_for_range(type, left, right);
-    }
+    bool is_blockable() const override { return function->is_blockable(); }
 
 private:
     std::shared_ptr<IFunction> function;
@@ -528,31 +483,92 @@ private:
     DataTypePtr return_type;
 };
 
+struct simple_function_creator_without_type0 {
+    template <typename AggregateFunctionTemplate, typename... TArgs>
+    static std::shared_ptr<IFunction> create(const DataTypePtr& result_type, TArgs&&... args) {
+        std::unique_ptr<IFunction> result(std::make_unique<AggregateFunctionTemplate>(
+                result_type, std::forward<TArgs>(args)...));
+        return std::shared_ptr<IFunction>(result.release());
+    }
+};
+template <template <PrimitiveType> class FunctionTemplate>
+struct SimpleFunctionCurryDirectWithResultType0 {
+    template <PrimitiveType ResultType>
+    using T = FunctionTemplate<ResultType>;
+};
+template <PrimitiveType... AllowedTypes>
+struct simple_function_creator_with_result_type0 {
+    template <typename Class, typename... TArgs>
+    static std::shared_ptr<IFunction> create_base_with_result_type(const DataTypePtr& result_type,
+                                                                   TArgs&&... args) {
+        auto create = [&]<PrimitiveType ResultType>() {
+            return simple_function_creator_without_type0::create<
+                    typename Class::template T<ResultType>>(result_type,
+                                                            std::forward<TArgs>(args)...);
+        };
+        std::shared_ptr<IFunction> result = nullptr;
+        auto type = result_type->get_primitive_type();
+
+        (
+                [&] {
+                    if (type == AllowedTypes) {
+                        static_assert(AllowedTypes == TYPE_DECIMAL128I ||
+                                      AllowedTypes == TYPE_DECIMAL256);
+                        result = create.template operator()<AllowedTypes>();
+                    }
+                }(),
+                ...);
+
+        return result;
+    }
+
+    // Create agg function with result type from FE.
+    // Currently only used for decimalv3 sum and avg.
+    template <template <PrimitiveType> class FunctionTemplate>
+    static std::shared_ptr<IFunction> creator_with_result_type(const DataTypePtr& result_type) {
+        return create_base_with_result_type<
+                SimpleFunctionCurryDirectWithResultType0<FunctionTemplate>>(result_type);
+    }
+};
+
 class DefaultFunctionBuilder : public FunctionBuilderImpl {
 public:
     explicit DefaultFunctionBuilder(std::shared_ptr<IFunction> function_)
             : function(std::move(function_)) {}
 
-    void check_number_of_arguments(size_t number_of_arguments) const override {
-        return function->check_number_of_arguments(number_of_arguments);
+    // template <template <PrimitiveType> class FunctionTemplate>
+    explicit DefaultFunctionBuilder(DataTypePtr return_type)
+            : _return_type(std::move(return_type)) {}
+
+    template <template <PrimitiveType> class FunctionTemplate>
+    static FunctionBuilderPtr create_array_agg_function_decimalv3(DataTypePtr return_type) {
+        auto builder = std::make_shared<DefaultFunctionBuilder>(return_type);
+        DataTypePtr real_return_type;
+        // for array_cum_sum, the return type is array,
+        // so here should check nested type
+        if (PrimitiveType::TYPE_ARRAY == return_type->get_primitive_type()) {
+            const DataTypeArray* data_type_array =
+                    static_cast<const DataTypeArray*>(remove_nullable(return_type).get());
+            real_return_type = data_type_array->get_nested_type();
+        } else {
+            real_return_type = return_type;
+        }
+        builder->function =
+                simple_function_creator_with_result_type0<TYPE_DECIMAL128I, TYPE_DECIMAL256>::
+                        creator_with_result_type<FunctionTemplate>(real_return_type);
+        return builder;
     }
 
-    bool is_deterministic() const override { return function->is_deterministic(); }
-    bool is_deterministic_in_scope_of_query() const override {
-        return function->is_deterministic_in_scope_of_query();
+    void check_number_of_arguments(size_t number_of_arguments) const override {
+        function->check_number_of_arguments(number_of_arguments);
     }
 
     String get_name() const override { return function->get_name(); }
-    bool is_stateful() const override { return function->is_stateful(); }
     bool is_variadic() const override { return function->is_variadic(); }
     size_t get_number_of_arguments() const override { return function->get_number_of_arguments(); }
 
     ColumnNumbers get_arguments_that_are_always_constant() const override {
         return function->get_arguments_that_are_always_constant();
-    }
-    ColumnNumbers get_arguments_that_dont_imply_nullable_return_type(
-            size_t number_of_arguments) const override {
-        return function->get_arguments_that_dont_imply_nullable_return_type(number_of_arguments);
     }
 
 protected:
@@ -566,17 +582,19 @@ protected:
     bool use_default_implementation_for_nulls() const override {
         return function->use_default_implementation_for_nulls();
     }
-    bool use_default_implementation_for_low_cardinality_columns() const override {
-        return function->use_default_implementation_for_low_cardinality_columns();
-    }
-    bool can_be_executed_on_low_cardinality_dictionary() const override {
-        return function->can_be_executed_on_low_cardinality_dictionary();
+
+    bool skip_return_type_check() const override { return function->skip_return_type_check(); }
+
+    bool need_replace_null_data_to_default() const override {
+        return function->need_replace_null_data_to_default();
     }
 
     FunctionBasePtr build_impl(const ColumnsWithTypeAndName& arguments,
                                const DataTypePtr& return_type) const override {
         DataTypes data_types(arguments.size());
-        for (size_t i = 0; i < arguments.size(); ++i) data_types[i] = arguments[i].type;
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            data_types[i] = arguments[i].type;
+        }
         return std::make_shared<DefaultFunction>(function, data_types, return_type);
     }
 
@@ -586,14 +604,14 @@ protected:
 
 private:
     std::shared_ptr<IFunction> function;
+    DataTypePtr _return_type;
 };
 
 using FunctionPtr = std::shared_ptr<IFunction>;
-
 /** Return ColumnNullable of src, with null map as OR-ed null maps of args columns in blocks.
   * Or ColumnConst(ColumnNullable) if the result is always NULL or if the result is constant and always not NULL.
   */
 ColumnPtr wrap_in_nullable(const ColumnPtr& src, const Block& block, const ColumnNumbers& args,
-                           size_t result, size_t input_rows_count);
+                           size_t input_rows_count);
 
 } // namespace doris::vectorized

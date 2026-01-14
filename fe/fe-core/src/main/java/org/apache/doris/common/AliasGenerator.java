@@ -20,10 +20,10 @@
 
 package org.apache.doris.common;
 
-import java.util.Set;
-
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Sets;
+
+import java.util.Set;
 
 /**
  * Abstract class representing an alias generator. It uses a prefix and a
@@ -41,7 +41,7 @@ public abstract class AliasGenerator {
     public String getNextAlias() {
         Preconditions.checkNotNull(aliasPrefix);
         while (true) {
-            String candidateAlias = aliasPrefix + Integer.toString(numGeneratedAliases++);
+            String candidateAlias = aliasPrefix + (numGeneratedAliases++);
             if (usedAliases.add(candidateAlias)) {
                 // add success
                 return candidateAlias;
@@ -52,4 +52,3 @@ public abstract class AliasGenerator {
         }
     }
 }
-

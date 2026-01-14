@@ -17,10 +17,11 @@
 
 package org.apache.doris.persist;
 
-import com.google.common.collect.Lists;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.common.AnalysisException;
+
+import com.google.common.collect.Lists;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
@@ -31,6 +32,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.HashMap;
 
 public class AlterViewInfoTest {
     private static String fileName = "./AlterViewInfoTest";
@@ -56,7 +58,7 @@ public class AlterViewInfoTest {
         Column column1 = new Column("col1", PrimitiveType.BIGINT);
         Column column2 = new Column("col2", PrimitiveType.DOUBLE);
 
-        AlterViewInfo alterViewInfo = new AlterViewInfo(dbId, tableId, inlineViewDef, Lists.newArrayList(column1, column2), sqlMode);
+        AlterViewInfo alterViewInfo = new AlterViewInfo(dbId, tableId, inlineViewDef, Lists.newArrayList(column1, column2), new HashMap<>(), null);
         alterViewInfo.write(out);
         out.flush();
         out.close();

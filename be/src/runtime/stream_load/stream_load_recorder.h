@@ -15,11 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <atomic>
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
-#include "olap/utils.h"
-#include "rocksdb/utilities/db_ttl.h"
+#include "common/factory_creator.h"
+
+namespace rocksdb {
+class ColumnFamilyHandle;
+class DBWithTTL;
+} // namespace rocksdb
 
 #pragma once
 
@@ -28,30 +36,36 @@ namespace doris {
 class Status;
 
 class StreamLoadRecorder {
+    ENABLE_FACTORY_CREATOR(StreamLoadRecorder);
+
 public:
-    StreamLoadRecorder(const std::string& root_path);
+    StreamLoadRecorder(std::string root_path);
 
     virtual ~StreamLoadRecorder();
 
     Status init();
 
-    Status put(const std::string& key, const std::string& value);
+    Status put(const std::string& key, const std::string& value, bool use_meta_cf = false);
 
-    Status get_batch(const std::string& start, const int batch_size,
+    Status get(const std::string& key, std::string* value, bool use_meta_cf = false);
+
+    Status get_batch(const std::string& start, int batch_size,
                      std::map<std::string, std::string>* stream_load_records);
 
 private:
     std::string _root_path;
-    rocksdb::DBWithTTL* _db;
+    std::unique_ptr<rocksdb::DBWithTTL> _db;
     std::vector<rocksdb::ColumnFamilyHandle*> _handles;
 
     std::atomic<int64_t> _last_compaction_time;
 
     enum ColumnFamilyIndex {
         DEFAULT_COLUMN_FAMILY_INDEX = 0,
+        META_COLUMN_FAMILY_INDEX = 1,
     };
 
     const std::string DEFAULT_COLUMN_FAMILY = "default";
+    const std::string META_COLUMN_FAMILY = "meta";
 };
 
 } // namespace doris

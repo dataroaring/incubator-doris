@@ -17,11 +17,17 @@
 
 #include "geo/wkt_parse.h"
 
-#include <gtest/gtest.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <string.h>
+
+#include <memory>
+#include <ostream>
+#include <string>
 
 #include "common/logging.h"
 #include "geo/geo_types.h"
-#include "geo/wkt_parse_ctx.h"
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 
@@ -34,19 +40,18 @@ public:
 TEST_F(WktParseTest, normal) {
     const char* wkt = "POINT(1 2)";
 
-    GeoShape* shape = nullptr;
-    auto status = WktParse::parse_wkt(wkt, strlen(wkt), &shape);
+    std::unique_ptr<GeoShape> shape;
+    auto status = WktParse::parse_wkt(wkt, strlen(wkt), shape);
     EXPECT_EQ(GEO_PARSE_OK, status);
     EXPECT_NE(nullptr, shape);
     LOG(INFO) << "parse result: " << shape->to_string();
-    delete shape;
 }
 
 TEST_F(WktParseTest, invalid_wkt) {
     const char* wkt = "POINT(1,2)";
 
-    GeoShape* shape = nullptr;
-    auto status = WktParse::parse_wkt(wkt, strlen(wkt), &shape);
+    std::unique_ptr<GeoShape> shape;
+    auto status = WktParse::parse_wkt(wkt, strlen(wkt), shape);
     EXPECT_NE(GEO_PARSE_OK, status);
     EXPECT_EQ(nullptr, shape);
 }

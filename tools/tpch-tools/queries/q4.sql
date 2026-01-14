@@ -29,8 +29,8 @@ where
         from
             lineitem
         where
-            l_orderkey = o_orderkey
-            and l_commitdate < l_receiptdate
+                l_orderkey = o_orderkey
+          and l_commitdate < l_receiptdate
     )
 group by
     o_orderpriority

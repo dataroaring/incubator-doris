@@ -18,9 +18,12 @@
 package org.apache.doris.qe;
 
 import org.apache.doris.analysis.AccessTestUtil;
+import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlProto;
 
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -29,10 +32,6 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.atomic.AtomicLong;
-
-import mockit.Delegate;
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class ConnectSchedulerTest {
     private static final Logger LOG = LoggerFactory.getLogger(ConnectScheduler.class);
@@ -66,34 +65,15 @@ public class ConnectSchedulerTest {
 
     @Test
     public void testSubmit(@Mocked ConnectProcessor processor) throws Exception {
-        // mock new processor
-        new Expectations() {
-            {
-                processor.loop();
-                result = new Delegate() {
-                    void fakeLoop() {
-                        LOG.warn("starts loop");
-                        // Make cancel thread to work
-                        succSubmit.incrementAndGet();
-                        try {
-                            Thread.sleep(2000);
-                        } catch (InterruptedException e) {
-                            LOG.warn("sleep exception");
-                        }
-                    }
-                };
-            }
-        };
-
         ConnectScheduler scheduler = new ConnectScheduler(10);
         for (int i = 0; i < 2; ++i) {
-            ConnectContext context = new ConnectContext(socketChannel);
+            ConnectContext context = new ConnectContext();
             if (i == 1) {
-                context.setCatalog(AccessTestUtil.fetchBlockCatalog());
+                context.setEnv(AccessTestUtil.fetchBlockCatalog());
             } else {
-                context.setCatalog(AccessTestUtil.fetchAdminCatalog());
+                context.setEnv(AccessTestUtil.fetchAdminCatalog());
             }
-            context.setQualifiedUser("root");
+            context.setCurrentUserIdentity(UserIdentity.ROOT);
             Assert.assertTrue(scheduler.submit(context));
             Assert.assertEquals(i, context.getConnectionId());
         }
@@ -101,18 +81,11 @@ public class ConnectSchedulerTest {
 
     @Test
     public void testProcessException(@Mocked ConnectProcessor processor) throws Exception {
-        new Expectations() {
-            {
-                processor.loop();
-                result = new RuntimeException("failed");
-            }
-        };
-
         ConnectScheduler scheduler = new ConnectScheduler(10);
 
-        ConnectContext context = new ConnectContext(socketChannel);
-        context.setCatalog(AccessTestUtil.fetchAdminCatalog());
-        context.setQualifiedUser("root");
+        ConnectContext context = new ConnectContext();
+        context.setEnv(AccessTestUtil.fetchAdminCatalog());
+        context.setCurrentUserIdentity(UserIdentity.ROOT);
         Assert.assertTrue(scheduler.submit(context));
         Assert.assertEquals(0, context.getConnectionId());
 
@@ -129,7 +102,7 @@ public class ConnectSchedulerTest {
     @Test
     public void testSubmitTooMany() throws InterruptedException {
         ConnectScheduler scheduler = new ConnectScheduler(0);
-        ConnectContext context = new ConnectContext(socketChannel);
+        ConnectContext context = new ConnectContext();
         Assert.assertTrue(scheduler.submit(context));
     }
 }

@@ -20,6 +20,9 @@
 #include <float.h>
 #include <stdint.h>
 
+#include <cstring>
+#include <string>
+
 namespace doris {
 
 typedef unsigned char uchar;
@@ -32,7 +35,10 @@ typedef unsigned char uchar;
         *(T + 1) = (uchar)(((uint32_t)(A) >> 8)); \
         *(T + 2) = (uchar)(((A) >> 16));          \
     } while (0)
+#define int4store(T, A) *((uint32_t*)(T)) = (uint32_t)(A)
 #define int8store(T, A) *((int64_t*)(T)) = (uint64_t)(A)
+#define float4store(T, A) *((float*)(T)) = (float)(A)
+#define float8store(T, A) *((double*)(T)) = (double)(A)
 
 #define MY_ALIGN(A, L) (((A) + (L)-1) & ~((L)-1))
 #define SIZEOF_CHARP 8
@@ -57,5 +63,42 @@ typedef unsigned char uchar;
 
 /* -[digits].[frac] */
 #define MAX_DECIMAL_STR_LENGTH 29
+
+inline void direct_write_to_mysql_result_string(std::string& mysql_rows, const char* str,
+                                                size_t size) {
+    // MySQL protocol length encoding:
+    // <= 250: 1 byte for length
+    // < 65536: 1 byte (252) + 2 bytes for length
+    // < 16777216: 1 byte (253) + 3 bytes for length
+    // >= 16777216: 1 byte (254) + 8 bytes for length
+
+    char buf[16];
+    if (size < 251ULL) {
+        int1store(buf, size);
+        mysql_rows.append(buf, 1);
+    } else if (size < 65536ULL) {
+        buf[0] = static_cast<char>(252);
+        uint16_t temp16 = static_cast<uint16_t>(size);
+        memcpy(buf + 1, &temp16, sizeof(temp16));
+        mysql_rows.append(buf, 3);
+    } else if (size < 16777216ULL) {
+        buf[0] = static_cast<char>(253);
+        int3store(buf + 1, size);
+        mysql_rows.append(buf, 4);
+    } else {
+        buf[0] = static_cast<char>(254);
+        uint64_t temp64 = static_cast<uint64_t>(size);
+        memcpy(buf + 1, &temp64, sizeof(temp64));
+        mysql_rows.append(buf, 9);
+    }
+
+    // Append string content
+    mysql_rows.append(str, size);
+}
+
+inline void direct_write_to_mysql_result_null(std::string& mysql_rows) {
+    // MySQL protocol for NULL value is a single byte with value 251
+    mysql_rows.push_back(static_cast<char>(251));
+}
 
 } // namespace doris

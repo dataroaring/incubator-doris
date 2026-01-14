@@ -17,43 +17,24 @@
 
 #include "exec/olap_common.h"
 
-#include <boost/lexical_cast.hpp>
-#include <set>
-#include <sstream>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include "exec/olap_utils.h"
 
 namespace doris {
-
 template <>
-std::string cast_to_string(__int128 value) {
-    std::stringstream ss;
-    ss << value;
-    return ss.str();
-}
-
+const typename ColumnValueRange<TYPE_FLOAT>::CppType ColumnValueRange<TYPE_FLOAT>::TYPE_MIN =
+        -std::numeric_limits<float>::infinity();
 template <>
-std::string cast_to_string(int8_t value) {
-    return std::to_string(static_cast<int>(value));
-}
-
+const typename ColumnValueRange<TYPE_FLOAT>::CppType ColumnValueRange<TYPE_FLOAT>::TYPE_MAX =
+        std::numeric_limits<float>::quiet_NaN();
 template <>
-void ColumnValueRange<StringValue>::convert_to_fixed_value() {
-    return;
-}
-
+const typename ColumnValueRange<TYPE_DOUBLE>::CppType ColumnValueRange<TYPE_DOUBLE>::TYPE_MIN =
+        -std::numeric_limits<double>::infinity();
 template <>
-void ColumnValueRange<DecimalV2Value>::convert_to_fixed_value() {
-    return;
-}
-
-template <>
-void ColumnValueRange<__int128>::convert_to_fixed_value() {
-    return;
-}
+const typename ColumnValueRange<TYPE_DOUBLE>::CppType ColumnValueRange<TYPE_DOUBLE>::TYPE_MAX =
+        std::numeric_limits<double>::quiet_NaN();
 
 Status OlapScanKeys::get_key_range(std::vector<std::unique_ptr<OlapScanRange>>* key_range) {
     key_range->clear();

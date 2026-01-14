@@ -34,8 +34,8 @@ where
         from
             lineitem l2
         where
-            l2.l_orderkey = l1.l_orderkey
-            and l2.l_suppkey <> l1.l_suppkey
+                l2.l_orderkey = l1.l_orderkey
+          and l2.l_suppkey <> l1.l_suppkey
     )
     and not exists (
         select
@@ -43,9 +43,9 @@ where
         from
             lineitem l3
         where
-            l3.l_orderkey = l1.l_orderkey
-            and l3.l_suppkey <> l1.l_suppkey
-            and l3.l_receiptdate > l3.l_commitdate
+                l3.l_orderkey = l1.l_orderkey
+          and l3.l_suppkey <> l1.l_suppkey
+          and l3.l_receiptdate > l3.l_commitdate
     )
     and s_nationkey = n_nationkey
     and n_name = 'SAUDI ARABIA'

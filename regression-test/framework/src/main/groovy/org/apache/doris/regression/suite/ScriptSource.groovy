@@ -34,7 +34,14 @@ class GroovyFileSource implements ScriptSource {
 
     @Override
     SuiteScript toScript(ScriptContext scriptContext, GroovyShell shell) {
-        SuiteScript suiteScript = shell.parse(file) as SuiteScript
+        def setPropertyFunction = '''
+\nvoid setProperty(String key, value) {
+    throw new IllegalArgumentException("defined global variables in script are not allowed: ${key}")
+}
+'''
+        def scriptContent = file.text
+        scriptContent = scriptContent + setPropertyFunction
+        SuiteScript suiteScript = shell.parse(scriptContent, file.getName()) as SuiteScript
         suiteScript.init(scriptContext)
         return suiteScript
     }
@@ -59,30 +66,41 @@ class SqlFileSource implements ScriptSource {
         return SuiteScript.getDefaultGroups(suiteRoot, file)
     }
 
+    List<String> getSqls(String sql) {
+        try {
+            return SqlUtils.splitAndGetNonEmptySql(sql)
+        } catch (Throwable t) {
+            log.warn("Try to execute whole file text as one sql, because can not split sql:\n${sql}", t)
+            return [sql]
+        }
+    }
+
     @Override
     SuiteScript toScript(ScriptContext scriptContext, GroovyShell shell) {
         String suiteName = file.name.substring(0, file.name.lastIndexOf("."))
         String groupName = getGroup()
-        boolean order = suiteName.endsWith("_order")
-        String tag = suiteName
-        String sql = file.text
-
-        List<String> sqls
-        try {
-            sqls = SqlUtils.splitAndGetNonEmptySql(sql)
-        } catch (Throwable t) {
-            sqls = [sql]
-            log.warn("Try to execute whole file text as one sql, because can not split sql:\n${sql}", t)
-        }
 
         SuiteScript script = new SuiteScript() {
             @Override
             Object run() {
+                List<String> sqls = getSqls(file.text)
                 suite(suiteName, groupName) {
+                    String tag = suiteName
+                    String exceptionStr = ""
+                    boolean order = suiteName.endsWith("_order")
+                    log.info("Try to execute group: ${groupName} suite: ${suiteName} with ${sqls.size()} stmts")
                     for (int i = 0; i < sqls.size(); ++i) {
                         String singleSql = sqls.get(i)
                         String tagName = (i == 0) ? tag : "${tag}_${i + 1}"
-                        quickTest(tagName, singleSql, order)
+                        try {
+                            quickTest(tagName, singleSql, order)
+                        } catch (Throwable e) {
+                            String curException = "exception : ${e.getMessage()}\n" + "sql is :" + "${singleSql}\n"
+                            exceptionStr += curException
+                        }
+                    }
+                    if (exceptionStr.size() != 0) {
+                        throw new IllegalStateException("exceptions : ${exceptionStr}")
                     }
                 }
             }

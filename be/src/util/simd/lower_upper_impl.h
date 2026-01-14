@@ -16,12 +16,13 @@
 // under the License.
 
 #pragma once
-#ifdef __SSE2__
-#include <emmintrin.h>
-#endif
+
 #include <stdint.h>
+
 #include <iostream>
 #include <string>
+
+#include "util/sse_util.hpp"
 
 // the code refer: https://clickhouse.tech/codebrowser/html_report//ClickHouse/src/Functions/LowerUpperImpl.h.html
 // Doris only handle one character at a time, this function use SIMD to more characters at a time
@@ -33,7 +34,7 @@ public:
     static void transfer(const uint8_t* src, const uint8_t* src_end, uint8_t* dst) {
         const auto flip_case_mask = 'A' ^ 'a';
 
-#ifdef __SSE2__
+#if defined(__SSE2__) || defined(__aarch64__)
         const auto bytes_sse = sizeof(__m128i);
         const auto src_end_sse = src_end - (src_end - src) % bytes_sse;
 

@@ -14,8 +14,8 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef DORIS_UTIL_DEBUG_LEAK_ANNOTATIONS_H_
-#define DORIS_UTIL_DEBUG_LEAK_ANNOTATIONS_H_
+
+#pragma once
 
 // Ignore a single leaked object, given its pointer.
 // Does nothing if LeakSanitizer is not enabled.
@@ -69,8 +69,7 @@ void __lsan_do_leak_check();
 int __lsan_do_recoverable_leak_check();
 } // extern "C"
 
-namespace doris {
-namespace debug {
+namespace doris::debug {
 
 class ScopedLSANDisabler {
 public:
@@ -78,7 +77,4 @@ public:
     ~ScopedLSANDisabler() { __lsan_enable(); }
 };
 
-} // namespace debug
-} // namespace doris
-
-#endif // DORIS_UTIL_DEBUG_LEAK_ANNOTATIONS_H_
+} // namespace doris::debug

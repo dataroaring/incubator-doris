@@ -17,23 +17,16 @@
 
 package org.apache.doris.common.property;
 
+import org.apache.doris.thrift.TPropertyVal;
+
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
-import org.apache.doris.thrift.TPropertyVal;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInput;
-import java.io.DataInputStream;
-import java.io.DataOutput;
-import java.io.DataOutputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.NoSuchElementException;
-
-import static org.junit.Assert.fail;
 
 public class PropertiesSetTest {
     @Test
@@ -59,21 +52,6 @@ public class PropertiesSetTest {
         Assert.assertEquals(3, thriftMap.get(FileFormat.SKIP_HEADER.getName()).intVal);
 
         properties = PropertiesSet.readFromThrift(FileFormat.get(), thriftMap);
-        verifyVariableProps(properties);
-    }
-
-    @Test
-    public void testDataOutputSerde() throws Exception {
-        ByteArrayOutputStream outStream = new ByteArrayOutputStream();
-        DataOutput output = new DataOutputStream(outStream);
-
-        PropertiesSet<FileFormat> properties = PropertiesSet.readFromStrMap(FileFormat.get(), rawVariableProps());
-        properties.writeToData(output);
-
-        ByteArrayInputStream inStream = new ByteArrayInputStream(outStream.toByteArray());
-        DataInput input = new DataInputStream(inStream);
-
-        properties = PropertiesSet.readFromData(FileFormat.get(), input);
         verifyVariableProps(properties);
     }
 
@@ -116,7 +94,7 @@ public class PropertiesSetTest {
     public void testCheckRequiredOpts() {
         try {
             PropertiesSet.readFromStrMap(FileFormat.get(), Maps.newHashMap());
-            fail("Expected an NoSuchElementException to be thrown");
+            Assert.fail("Expected an NoSuchElementException to be thrown");
         } catch (NoSuchElementException e) {
             Assert.assertTrue(e.getMessage().contains("Missing"));
         }

@@ -17,28 +17,21 @@
 
 package org.apache.doris.mysql.privilege;
 
-import org.apache.doris.analysis.UserIdentity;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
-import org.apache.doris.common.io.Text;
-import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.PatternMatcherException;
 
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
-public abstract class PrivTable implements Writable {
+public abstract class PrivTable {
     private static final Logger LOG = LogManager.getLogger(PrivTable.class);
 
     protected List<PrivEntry> entries = Lists.newArrayList();
@@ -47,44 +40,62 @@ public abstract class PrivTable implements Writable {
     protected boolean isClassNameWrote = false;
 
     /*
+     * Check if user@host has specified privilege
+     */
+    public boolean hasPriv(PrivPredicate wanted) {
+        for (PrivEntry entry : entries) {
+            // check priv
+            if (entry.privSet.satisfy(wanted)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /*
      * Add an entry to priv table.
      * If entry already exists and errOnExist is false, we try to reset or merge the new priv entry with existing one.
      * NOTICE, this method does not set password for the newly added entry if this is a user priv table, the caller
      * need to set password later.
      */
-    public PrivEntry addEntry(PrivEntry newEntry, boolean errOnExist, boolean errOnNonExist) throws DdlException {
-        PrivEntry existingEntry = getExistingEntry(newEntry);
-        if (existingEntry == null) {
-            if (errOnNonExist) {
-                throw new DdlException("User " + newEntry.getUserIdent() + " does not exist");
-            }
-            entries.add(newEntry);
-            Collections.sort(entries);
-            LOG.info("add priv entry: {}", newEntry);
-            return newEntry;
-        } else {
-            if (errOnExist) {
-                throw new DdlException("User already exist");
-            } else {
-                checkOperationAllowed(existingEntry, newEntry, "ADD ENTRY");
-                // if existing entry is set by domain resolver, just replace it with the new entry.
-                // if existing entry is not set by domain resolver, merge the 2 entries.
-                if (existingEntry.isSetByDomainResolver()) {
-                    existingEntry.setPrivSet(newEntry.getPrivSet());
-                    existingEntry.setSetByDomainResolver(newEntry.isSetByDomainResolver());
-                    LOG.debug("reset priv entry: {}", existingEntry);
-                } else if (!newEntry.isSetByDomainResolver()) {
-                    mergePriv(existingEntry, newEntry);
-                    existingEntry.setSetByDomainResolver(false);
-                    LOG.debug("merge priv entry: {}", existingEntry);
-                }
-            }
-            return existingEntry;
-        }
+    public PrivEntry addEntry(PrivEntry newEntry,
+            boolean errOnExist, boolean errOnNonExist) throws DdlException {
+        return addEntry(newEntry, errOnExist, errOnNonExist, false);
     }
 
+    public PrivEntry addEntry(PrivEntry entry, boolean errOnExist, boolean errOnNonExist, boolean isMerge)
+            throws DdlException {
+        PrivEntry newEntry = entry;
+        if (isMerge) {
+            try {
+                newEntry = entry.copy();
+            } catch (AnalysisException | PatternMatcherException e) {
+                LOG.error("exception when copy PrivEntry", e);
+            }
+        }
+
+        int idx = Collections.binarySearch(entries, newEntry);
+        if (idx < 0) {
+            if (errOnNonExist) {
+                throw new DdlException("entry does not exist");
+            }
+            int insertPos = -idx - 1;
+            entries.add(insertPos, newEntry);
+            return newEntry;
+        }
+
+        if (errOnExist) {
+            throw new DdlException("entry already exist");
+        }
+
+        PrivEntry existingEntry = entries.get(idx);
+        mergePriv(existingEntry, newEntry);
+        return existingEntry;
+    }
+
+
     public List<PrivEntry> getEntries() {
-        return entries;
+        return Collections.unmodifiableList(entries);
     }
 
     public void dropEntry(PrivEntry entry) {
@@ -99,60 +110,38 @@ public abstract class PrivTable implements Writable {
         }
     }
 
-    public void clearEntriesSetByResolver() {
-        Iterator<PrivEntry> iter = entries.iterator();
-        while (iter.hasNext()) {
-            PrivEntry privEntry = iter.next();
-            if (privEntry.isSetByDomainResolver()) {
-                iter.remove();
-                LOG.info("drop priv entry set by resolver: {}", privEntry);
-            }
-        }
-    }
-
-    // drop all entries which user name are matched, and is not set by resolver
-    public void dropUser(UserIdentity userIdentity) {
-        Iterator<PrivEntry> iter = entries.iterator();
-        while (iter.hasNext()) {
-            PrivEntry privEntry = iter.next();
-            if (privEntry.match(userIdentity, true /* exact match */) && !privEntry.isSetByDomainResolver()) {
-                iter.remove();
-                LOG.info("drop entry: {}", privEntry);
-            }
-        }
-    }
-
-    public void revoke(PrivEntry entry, boolean errOnNonExist, boolean deleteEntryWhenEmpty) throws DdlException {
+    public void revoke(PrivEntry entry, boolean errOnNonExist,
+            boolean deleteEntryWhenEmpty) throws DdlException {
         PrivEntry existingEntry = getExistingEntry(entry);
         if (existingEntry == null) {
             if (errOnNonExist) {
-                ErrorReport.reportDdlException(ErrorCode.ERR_NONEXISTING_GRANT, entry.getOrigUser(),
-                        entry.getOrigHost());
+                ErrorReport.reportDdlException(ErrorCode.ERR_NONEXISTING_GRANT);
             }
             return;
         }
-
-        checkOperationAllowed(existingEntry, entry, "REVOKE");
 
         // check if privs to be revoked exist in priv entry.
         PrivBitSet tmp = existingEntry.getPrivSet().copy();
         tmp.and(entry.getPrivSet());
         if (tmp.isEmpty()) {
             if (errOnNonExist) {
-                ErrorReport.reportDdlException(ErrorCode.ERR_NONEXISTING_GRANT, entry.getOrigUser(),
-                        entry.getOrigHost());
+                ErrorReport.reportDdlException(ErrorCode.ERR_NONEXISTING_GRANT);
             }
             // there is no such priv, nothing need to be done
             return;
         }
 
         // revoke privs from existing priv entry
-        LOG.debug("before revoke: {}, privs to be revoked: {}",
-                  existingEntry.getPrivSet(), entry.getPrivSet());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("before revoke: {}, privs to be revoked: {}",
+                    existingEntry.getPrivSet(), entry.getPrivSet());
+        }
         tmp = existingEntry.getPrivSet().copy();
         tmp.xor(entry.getPrivSet());
         existingEntry.getPrivSet().and(tmp);
-        LOG.debug("after revoke: {}", existingEntry);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("after revoke: {}", existingEntry);
+        }
 
         if (existingEntry.getPrivSet().isEmpty() && deleteEntryWhenEmpty) {
             // no priv exists in this entry, remove it
@@ -160,41 +149,16 @@ public abstract class PrivTable implements Writable {
         }
     }
 
-    /*
-     * the priv entry is classified by 'set by domain resolver'
-     * or 'NOT set by domain resolver'(other specified operations).
-     * if the existing entry is set by resolver, it can be reset by resolver or set by specified ops.
-     * in other word, if the existing entry is NOT set by resolver, it can not be set by resolver.
-     */
-    protected void checkOperationAllowed(PrivEntry existingEntry, PrivEntry newEntry, String op) throws DdlException {
-        if (!existingEntry.isSetByDomainResolver() && newEntry.isSetByDomainResolver()) {
-            throw new DdlException("the existing entry is NOT set by resolver: " + existingEntry + ","
-                    + " can not be set by resolver " + newEntry + ", op: " + op);
-        }
-    }
 
     // Get existing entry which is the keys match the given entry
     protected PrivEntry getExistingEntry(PrivEntry entry) {
-        for (PrivEntry existingEntry : entries) {
-            if (existingEntry.keyMatch(entry)) {
-                return existingEntry;
-            }
-        }
-        return null;
+        int idx = Collections.binarySearch(entries, entry);
+        return idx >= 0 ? entries.get(idx) : null;
     }
 
-    private void mergePriv(PrivEntry first, PrivEntry second) {
+    private void mergePriv(
+            PrivEntry first, PrivEntry second) {
         first.getPrivSet().or(second.getPrivSet());
-        first.setSetByDomainResolver(first.isSetByDomainResolver() || second.isSetByDomainResolver());
-    }
-
-    public boolean doesUsernameExist(String qualifiedUsername) {
-        for (PrivEntry entry : entries) {
-            if (entry.getOrigUser().equals(qualifiedUsername)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     // for test only
@@ -206,28 +170,6 @@ public abstract class PrivTable implements Writable {
         return entries.isEmpty();
     }
 
-    public static PrivTable read(DataInput in) throws IOException {
-        String className = Text.readString(in);
-        if (className.startsWith("com.baidu.palo")) {
-            // we need to be compatible with former class name
-            className = className.replaceFirst("com.baidu.palo", "org.apache.doris");
-        }
-        PrivTable privTable = null;
-        try {
-            Class<? extends PrivTable> derivedClass = (Class<? extends PrivTable>) Class.forName(className);
-            privTable = derivedClass.newInstance();
-            Class[] paramTypes = { DataInput.class };
-            Method readMethod = derivedClass.getMethod("readFields", paramTypes);
-            Object[] params = { in };
-            readMethod.invoke(privTable, params);
-
-            return privTable;
-        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException
-                | SecurityException | IllegalArgumentException | InvocationTargetException e) {
-            throw new IOException("failed read PrivTable", e);
-        }
-    }
-
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder("\n");
@@ -237,27 +179,16 @@ public abstract class PrivTable implements Writable {
         return sb.toString();
     }
 
-    @Override
-    public void write(DataOutput out) throws IOException {
-        if (!isClassNameWrote) {
-            String className = PrivTable.class.getCanonicalName();
-            Text.writeString(out, className);
-            isClassNameWrote = true;
+    public void merge(PrivTable privTable) {
+        for (PrivEntry entry : privTable.entries) {
+            try {
+                addEntry(entry, false, false, true);
+            } catch (DdlException e) {
+                //will no exception
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug(e.getMessage());
+                }
+            }
         }
-        out.writeInt(entries.size());
-        for (PrivEntry privEntry : entries) {
-            privEntry.write(out);
-        }
-        isClassNameWrote = false;
     }
-
-    public void readFields(DataInput in) throws IOException {
-        int size = in.readInt();
-        for (int i = 0; i < size; i++) {
-            PrivEntry entry = PrivEntry.read(in);
-            entries.add(entry);
-        }
-        Collections.sort(entries);
-    }
-
 }

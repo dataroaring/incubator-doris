@@ -18,12 +18,11 @@
 // https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/aligned-new.h
 // and modified by Doris
 
-#ifndef DORIS_BE_SRC_UTIL_ALIGNED_NEW_H_
-#define DORIS_BE_SRC_UTIL_ALIGNED_NEW_H_
+#pragma once
 
 #include <memory>
 
-#include "common/compiler_util.h"
+#include "common/compiler_util.h" // IWYU pragma: keep
 #include "common/logging.h"
 
 namespace doris {
@@ -56,5 +55,3 @@ private:
 
 using CacheLineAligned = AlignedNew<CACHE_LINE_SIZE>;
 } // namespace doris
-
-#endif

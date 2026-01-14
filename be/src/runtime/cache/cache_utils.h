@@ -15,10 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_CACHE_UTILS_H
-#define DORIS_BE_SRC_RUNTIME_CACHE_UTILS_H
+#pragma once
 
-#include <gutil/integral_types.h>
 #include <sys/time.h>
 
 #include <algorithm>
@@ -37,16 +35,12 @@ namespace doris {
 typedef std::shared_lock<std::shared_mutex> CacheReadLock;
 typedef std::unique_lock<std::shared_mutex> CacheWriteLock;
 
-//#ifndef PARTITION_CACHE_DEV
-//#define PARTITION_CACHE_DEV
-//#endif
-
 struct CacheStat {
-    static const uint32 DAY_SECONDS = 86400;
+    static const uint32_t DAY_SECONDS = 86400;
     long cache_time;
     long last_update_time;
     long last_read_time;
-    uint32 read_count;
+    uint32_t read_count;
     CacheStat() { init(); }
 
     long cache_time_second() {
@@ -84,4 +78,3 @@ struct CacheStat {
 };
 
 } // namespace doris
-#endif

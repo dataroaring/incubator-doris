@@ -20,14 +20,13 @@ package org.apache.doris.httpv2.rest;
 import org.apache.doris.common.Config;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
 
-import org.apache.parquet.Strings;
+import com.google.common.base.Strings;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
-
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 
 /**
  * Api for getting the base path of api
@@ -36,9 +35,13 @@ import javax.servlet.http.HttpServletResponse;
  * This Api will return the path configured in Config.http_api_extra_base_path.
  */
 @RestController
-public class ExtraBasepathAction {
+public class ExtraBasepathAction extends RestBaseController {
     @RequestMapping(path = "/api/basepath", method = RequestMethod.GET)
     public ResponseEntity execute(HttpServletRequest request, HttpServletResponse response) {
+        if (Config.enable_all_http_auth) {
+            executeCheckPassword(request, response);
+        }
+
         BasepathResponse resp = new BasepathResponse();
         resp.path = Config.http_api_extra_base_path;
         if (Strings.isNullOrEmpty(Config.http_api_extra_base_path)) {
@@ -70,5 +73,3 @@ public class ExtraBasepathAction {
         }
     }
 }
-
-

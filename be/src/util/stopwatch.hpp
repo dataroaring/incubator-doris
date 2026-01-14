@@ -18,8 +18,7 @@
 // https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/stopwatch.hpp
 // and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
-#define DORIS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
+#pragma once
 
 #include <time.h>
 
@@ -34,10 +33,15 @@ namespace doris {
 template <clockid_t Clock>
 class CustomStopWatch {
 public:
-    CustomStopWatch() {
+    CustomStopWatch(bool auto_start = false) {
         _total_time = 0;
         _running = false;
+        if (auto_start) {
+            start();
+        }
     }
+
+    timespec start_time() const { return _start; }
 
     void start() {
         if (!_running) {
@@ -76,6 +80,20 @@ public:
                (end.tv_nsec - _start.tv_nsec);
     }
 
+    // Return time in microseconds
+    uint64_t elapsed_time_microseconds() const { return elapsed_time() / 1000; }
+
+    // Return time in milliseconds
+    uint64_t elapsed_time_milliseconds() const { return elapsed_time() / 1000 / 1000; }
+
+    // Returns time in nanosecond.
+    int64_t elapsed_time_seconds(timespec end) const {
+        if (!_running) {
+            return _total_time / 1000L / 1000L / 1000L;
+        }
+        return end.tv_sec - _start.tv_sec;
+    }
+
 private:
     timespec _start;
     uint64_t _total_time; // in nanosec
@@ -94,5 +112,3 @@ using MonotonicStopWatch = CustomStopWatch<CLOCK_MONOTONIC>;
 using ThreadCpuStopWatch = CustomStopWatch<CLOCK_THREAD_CPUTIME_ID>;
 
 } // namespace doris
-
-#endif

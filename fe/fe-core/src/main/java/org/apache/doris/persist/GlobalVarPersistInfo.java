@@ -24,7 +24,6 @@ import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.VariableMgr;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.json.simple.JSONObject;
@@ -62,6 +61,11 @@ public class GlobalVarPersistInfo implements Writable {
     @Override
     public void write(DataOutput out) throws IOException {
         try {
+            if (varNames == null && persistJsonString != null) {
+                Text.writeString(out, persistJsonString);
+                return;
+            }
+
             JSONObject root = new JSONObject();
             for (String varName : varNames) {
                 // find attr in defaultSessionVariable or GlobalVariables

@@ -1,4 +1,3 @@
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -19,23 +18,25 @@
 // https://github.com/apache/kudu/blob/master/src/kudu/util/block_bloom_filter.cc
 // and modified by Doris
 
-#ifdef __aarch64__
-#include "util/sse2neon.h"
-#else //__aarch64__
-#include <emmintrin.h>
-#include <mm_malloc.h>
-#endif
+#include <butil/iobuf.h>
+#include <fmt/format.h>
+#include <glog/logging.h>
 
 #include <algorithm>
-#include <climits>
-#include <cmath>
+#include <climits> // IWYU pragma: keep
+#include <cmath>   // IWYU pragma: keep
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 
+#include "common/status.h"
 #include "exprs/block_bloom_filter.hpp"
+// IWYU pragma: no_include <emmintrin.h>
+#include "util/sse_util.hpp"
 
 namespace doris {
+#include "common/compile_check_begin.h"
 
 constexpr uint32_t BlockBloomFilter::kRehash[8] __attribute__((aligned(32)));
 // constexpr data member requires initialization in the class declaration.
@@ -60,17 +61,21 @@ Status BlockBloomFilter::init_internal(const int log_space_bytes, uint32_t hash_
     // Since we use 32 bits in the arguments of Insert() and Find(), _log_num_buckets
     // must be limited.
     if (_log_num_buckets > 32) {
-        return Status::InvalidArgument(
-                fmt::format("Bloom filter too large. log_space_bytes: {}", log_space_bytes));
+        return Status::InvalidArgument("Bloom filter too large. log_space_bytes: {}",
+                                       log_space_bytes);
     }
     // Don't use _log_num_buckets if it will lead to undefined behavior by a shift
     // that is too large.
-    _directory_mask = (1ULL << _log_num_buckets) - 1;
+    _directory_mask = (1 << _log_num_buckets) - 1;
 
     const size_t alloc_size = directory_size();
     close(); // Ensure that any previously allocated memory for directory_ is released.
-    _mem_holder.reset(new char[alloc_size]);
-    _directory = (Bucket*)_mem_holder.get();
+    DCHECK(_directory == nullptr);
+    int rc = posix_memalign((void**)&_directory, 32, alloc_size);
+    if (rc != 0) {
+        return Status::InternalError("block_bloom_filter alloc fail");
+    }
+
     _hash_seed = hash_seed;
     return Status::OK();
 }
@@ -83,27 +88,59 @@ Status BlockBloomFilter::init(const int log_space_bytes, uint32_t hash_seed) {
     return Status::OK();
 }
 
-Status BlockBloomFilter::init_from_directory(int log_space_bytes, const Slice& directory,
-                                             bool always_false, uint32_t hash_seed) {
+Status BlockBloomFilter::init_from_directory(int log_space_bytes,
+                                             butil::IOBufAsZeroCopyInputStream* data,
+                                             const size_t data_size, bool always_false,
+                                             uint32_t hash_seed) {
     RETURN_IF_ERROR(init_internal(log_space_bytes, hash_seed));
     DCHECK(_directory);
 
-    if (directory_size() != directory.size) {
+    if (directory_size() != data_size) {
         return Status::InvalidArgument(fmt::format(
                 "Mismatch in BlockBloomFilter source directory size {} and expected size {}",
-                directory.size, directory_size()));
+                data_size, directory_size()));
     }
-    memcpy(_directory, directory.data, directory.size);
+    int size = 0;
+    char* tmp;
+    const void** ptr = (const void**)&tmp;
+    char* data_ptr = reinterpret_cast<char*>(_directory);
+    while (data->Next(ptr, &size)) {
+        memcpy(data_ptr, *ptr, size);
+        data_ptr += size;
+    }
     _always_false = always_false;
     return Status::OK();
 }
 
 void BlockBloomFilter::close() {
     if (_directory != nullptr) {
+        free(_directory);
         _directory = nullptr;
     }
 }
 
+#ifdef __ARM_NEON
+void BlockBloomFilter::bucket_insert(const uint32_t bucket_idx, const uint32_t hash) noexcept {
+    const uint32x4x2_t mask = make_mask(hash);
+    uint32x4x2_t data = vld1q_u32_x2(&_directory[bucket_idx][0]);
+    data.val[0] = vorrq_u32(data.val[0], mask.val[0]);
+    data.val[1] = vorrq_u32(data.val[1], mask.val[1]);
+    vst1q_u32_x2(&_directory[bucket_idx][0], data);
+}
+
+bool BlockBloomFilter::bucket_find(const uint32_t bucket_idx, const uint32_t hash) const noexcept {
+    const uint32x4x2_t mask = make_mask(hash);
+    uint32x4x2_t data = vld1q_u32_x2(&_directory[bucket_idx][0]);
+    // The condition for returning true is that all the bits in _directory[bucket_idx][i] specified by masks[i] are 1.
+    // This can be equivalently expressed as all the bits in not( _directory[bucket_idx][i]) specified by masks[i] are 0.
+    // vbicq_u32(vec1, vec2) : Result of (vec1 AND NOT vec2)
+    // If true is returned, out_1 and out_2 should be all zeros.
+    uint32x4_t miss0 = vbicq_u32(mask.val[0], data.val[0]);
+    uint32x4_t miss1 = vbicq_u32(mask.val[1], data.val[1]);
+    uint32x4_t miss = vorrq_u32(miss0, miss1);
+    return vmaxvq_u32(miss) == 0U;
+}
+#else
 void BlockBloomFilter::bucket_insert(const uint32_t bucket_idx, const uint32_t hash) noexcept {
     // new_bucket will be all zeros except for eight 1-bits, one in each 32-bit word. It is
     // 16-byte aligned so it can be read as a __m128i using aligned SIMD loads in the second
@@ -115,35 +152,24 @@ void BlockBloomFilter::bucket_insert(const uint32_t bucket_idx, const uint32_t h
         new_bucket[i] = 1U << new_bucket[i];
     }
     for (int i = 0; i < 2; ++i) {
-#ifdef __aarch64__
-        uint8x16_t new_bucket_neon = vreinterpretq_u8_u32(vld1q_u32(new_bucket + 4 * i));
-        uint8x16_t* existing_bucket = reinterpret_cast<uint8x16_t*>(&_directory[bucket_idx][4 * i]);
-        *existing_bucket = vorrq_u8(*existing_bucket, new_bucket_neon);
-#else
         __m128i new_bucket_sse = _mm_load_si128(reinterpret_cast<__m128i*>(new_bucket + 4 * i));
         __m128i* existing_bucket =
                 reinterpret_cast<__m128i*>(&DCHECK_NOTNULL(_directory)[bucket_idx][4 * i]);
         *existing_bucket = _mm_or_si128(*existing_bucket, new_bucket_sse);
-#endif
     }
 }
 
 bool BlockBloomFilter::bucket_find(const uint32_t bucket_idx, const uint32_t hash) const noexcept {
+    uint32_t masks[kBucketWords];
+    make_mask(hash, masks);
     for (int i = 0; i < kBucketWords; ++i) {
-        BucketWord hval = (kRehash[i] * hash) >> ((1 << kLogBucketWordBits) - kLogBucketWordBits);
-        hval = 1U << hval;
-        if (!(DCHECK_NOTNULL(_directory)[bucket_idx][i] & hval)) {
+        if ((DCHECK_NOTNULL(_directory)[bucket_idx][i] & masks[i]) == 0) {
             return false;
         }
     }
     return true;
 }
-
-void BlockBloomFilter::insert_no_avx2(const uint32_t hash) noexcept {
-    _always_false = false;
-    const uint32_t bucket_idx = rehash32to32(hash) & _directory_mask;
-    bucket_insert(bucket_idx, hash);
-}
+#endif
 
 // To set 8 bits in an 32-byte Bloom filter, we set one bit in each 32-bit uint32_t. This
 // is a "split Bloom filter", and it has approximately the same false positive probability
@@ -160,18 +186,6 @@ void BlockBloomFilter::insert(const uint32_t hash) noexcept {
 #endif
 }
 
-bool BlockBloomFilter::find(const uint32_t hash) const noexcept {
-    if (_always_false) {
-        return false;
-    }
-    const uint32_t bucket_idx = rehash32to32(hash) & _directory_mask;
-#ifdef __AVX2__
-    return bucket_find_avx2(bucket_idx, hash);
-#else
-    return bucket_find(bucket_idx, hash);
-#endif
-}
-
 void BlockBloomFilter::or_equal_array_internal(size_t n, const uint8_t* __restrict__ in,
                                                uint8_t* __restrict__ out) {
 #ifdef __AVX2__
@@ -184,7 +198,7 @@ void BlockBloomFilter::or_equal_array_internal(size_t n, const uint8_t* __restri
 Status BlockBloomFilter::or_equal_array(size_t n, const uint8_t* __restrict__ in,
                                         uint8_t* __restrict__ out) {
     if ((n % kBucketByteSize) != 0) {
-        return Status::InvalidArgument(fmt::format("Input size {} not a multiple of 32-bytes", n));
+        return Status::InvalidArgument("Input size {} not a multiple of 32-bytes", n);
     }
 
     or_equal_array_internal(n, in, out);
@@ -194,7 +208,7 @@ Status BlockBloomFilter::or_equal_array(size_t n, const uint8_t* __restrict__ in
 
 void BlockBloomFilter::or_equal_array_no_avx2(size_t n, const uint8_t* __restrict__ in,
                                               uint8_t* __restrict__ out) {
-#ifdef __SSE4_2__
+#if defined(__SSE4_2__) || defined(__aarch64__)
     // The trivial loop out[i] |= in[i] should auto-vectorize with gcc at -O3, but it is not
     // written in a way that is very friendly to auto-vectorization. Instead, we manually
     // vectorize, increasing the speed by up to 56x.
@@ -233,20 +247,20 @@ Status BlockBloomFilter::merge(const BlockBloomFilter& other) {
         return Status::OK();
     }
     if (directory_size() != other.directory_size()) {
-        return Status::InvalidArgument(
-                fmt::format("Directory size don't match. this: {}, other: {}", directory_size(),
-                            other.directory_size()));
+        return Status::InvalidArgument("Directory size don't match. this: {}, other: {}",
+                                       directory_size(), other.directory_size());
     }
     if (other.always_false()) {
         // Nothing to do.
         return Status::OK();
     }
 
-    or_equal_array_internal(directory_size(), reinterpret_cast<const uint8*>(other._directory),
-                            reinterpret_cast<uint8*>(_directory));
+    or_equal_array_internal(directory_size(), reinterpret_cast<const uint8_t*>(other._directory),
+                            reinterpret_cast<uint8_t*>(_directory));
 
     _always_false = false;
     return Status::OK();
 }
 
 } // namespace doris
+#include "common/compile_check_end.h"

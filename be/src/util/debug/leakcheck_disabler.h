@@ -14,10 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef DORIS_UTIL_DEBUG_LEAKCHECK_DISABLER_H_
-#define DORIS_UTIL_DEBUG_LEAKCHECK_DISABLER_H_
 
-#include "gutil/macros.h"
+#pragma once
+
 #include "util/debug/leak_annotations.h"
 
 namespace doris {
@@ -39,5 +38,3 @@ private:
 
 } // namespace debug
 } // namespace doris
-
-#endif // DORIS_UTIL_DEBUG_LEAKCHECK_DISABLER_H_

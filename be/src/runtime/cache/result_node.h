@@ -15,46 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_RESULT_NODE_H
-#define DORIS_BE_SRC_RUNTIME_RESULT_NODE_H
+#pragma once
 
-#include <sys/time.h>
+#include <gen_cpp/internal_service.pb.h>
 
-#include <algorithm>
-#include <cassert>
 #include <cstdio>
-#include <cstdlib>
-#include <exception>
-#include <iostream>
 #include <list>
-#include <map>
-#include <string>
+#include <shared_mutex>
+#include <unordered_map>
 
-#include "common/config.h"
-#include "gen_cpp/internal_service.pb.h"
-#include "olap/olap_define.h"
 #include "runtime/cache/cache_utils.h"
-#include "runtime/mem_pool.h"
-#include "runtime/row_batch.h"
-#include "runtime/tuple_row.h"
 #include "util/uid_util.h"
 
 namespace doris {
-
-class PCacheParam;
-class PCacheValue;
-class PCacheResponse;
-class PFetchCacheRequest;
-class PFetchCacheResult;
-class PUpdateCacheRequest;
-class PClearCacheRequest;
 
 /**
 * Cache one partition data, request param must match version and time of cache
 */
 class PartitionRowBatch {
 public:
-    PartitionRowBatch(int64 partition_key)
+    PartitionRowBatch(int64_t partition_key)
             : _partition_key(partition_key), _cache_value(nullptr), _data_size(0) {}
 
     ~PartitionRowBatch() {}
@@ -63,7 +43,7 @@ public:
     bool is_hit_cache(const PCacheParam& param);
     void clear();
 
-    int64 get_partition_key() const { return _partition_key; }
+    int64_t get_partition_key() const { return _partition_key; }
 
     PCacheValue* get_value() { return _cache_value; }
 
@@ -82,6 +62,9 @@ private:
         if (req_param.last_version_time() > _cache_value->param().last_version_time()) {
             return false;
         }
+        if (req_param.partition_num() != _cache_value->param().partition_num()) {
+            return false;
+        }
         return true;
     }
 
@@ -93,20 +76,28 @@ private:
         if (up_param.last_version_time() > _cache_value->param().last_version_time()) {
             return true;
         }
+        if (up_param.last_version_time() == _cache_value->param().last_version_time() &&
+            up_param.partition_num() != _cache_value->param().partition_num()) {
+            return true;
+        }
         if (up_param.last_version() > _cache_value->param().last_version()) {
+            return true;
+        }
+        if (up_param.last_version() == _cache_value->param().last_version() &&
+            up_param.partition_num() != _cache_value->param().partition_num()) {
             return true;
         }
         return false;
     }
 
 private:
-    int64 _partition_key;
-    PCacheValue* _cache_value;
+    int64_t _partition_key;
+    PCacheValue* _cache_value = nullptr;
     size_t _data_size;
     CacheStat _cache_stat;
 };
 
-typedef int64 PartitionKey;
+typedef int64_t PartitionKey;
 typedef std::list<PartitionRowBatch*> PartitionRowBatchList;
 typedef std::unordered_map<PartitionKey, PartitionRowBatch*> PartitionRowBatchMap;
 
@@ -182,12 +173,11 @@ public:
 private:
     mutable std::shared_mutex _node_mtx;
     UniqueId _sql_key;
-    ResultNode* _prev;
-    ResultNode* _next;
+    ResultNode* _prev = nullptr;
+    ResultNode* _next = nullptr;
     size_t _data_size;
     PartitionRowBatchList _partition_list;
     PartitionRowBatchMap _partition_map;
 };
 
 } // namespace doris
-#endif
