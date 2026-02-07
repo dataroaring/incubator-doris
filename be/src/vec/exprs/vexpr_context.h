@@ -34,10 +34,10 @@
 #include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "runtime_filter/runtime_filter_selectivity.h"
-#include "udf/udf.h"
 #include "vec/columns/column.h"
 #include "vec/core/block.h"
 #include "vec/core/column_with_type_and_name.h"
+#include "vec/exprs/function_context.h"
 #include "vec/exprs/vexpr_fwd.h"
 
 namespace doris {
@@ -273,7 +273,12 @@ public:
         return _last_result_column_id;
     }
 
-    RuntimeFilterSelectivity& get_runtime_filter_selectivity() { return *_rf_selectivity; }
+    RuntimeFilterSelectivity& get_runtime_filter_selectivity() {
+        if (!_rf_selectivity) {
+            throw Exception(ErrorCode::INTERNAL_ERROR, "RuntimeFilterSelectivity is null");
+        }
+        return *_rf_selectivity;
+    }
 
     FunctionContext::FunctionStateScope get_function_state_scope() const {
         return _is_clone ? FunctionContext::THREAD_LOCAL : FunctionContext::FRAGMENT_LOCAL;

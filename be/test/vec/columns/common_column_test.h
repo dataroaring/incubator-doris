@@ -1127,9 +1127,8 @@ public:
         auto option = DataTypeSerDe::FormatOptions();
         for (size_t i = 0; i < load_cols.size(); ++i) {
             auto& source_column = load_cols[i];
-            const typename PrimitiveTypeTraits<T>::ColumnItemType* rd =
-                    (typename PrimitiveTypeTraits<T>::ColumnItemType*)source_column->get_raw_data()
-                            .data;
+            const typename PrimitiveTypeTraits<T>::CppType* rd =
+                    (typename PrimitiveTypeTraits<T>::CppType*)source_column->get_raw_data().data;
             for (size_t j = 0; j < source_column->size(); j++) {
                 Field f;
                 source_column->get(j, f);
@@ -2790,30 +2789,81 @@ auto assert_column_vector_insert_indices_from_callback = [](auto x,
 };
 
 template <PrimitiveType PType>
-auto assert_column_vector_insert_range_of_integer_callback =
-        [](auto x, const MutableColumnPtr& source_column) {
-            using T = decltype(x);
-            auto target_column = source_column->clone();
-            auto src_size = source_column->size();
-            auto* col_vec_target = assert_cast<ColumnVector<PType>*>(target_column.get());
-            auto* col_vec_src = assert_cast<ColumnVector<PType>*>(source_column.get());
-            if constexpr (std::is_same_v<T, Float32> || std::is_same_v<T, Float64>) {
-                typename PrimitiveTypeTraits<PType>::ColumnItemType begin {0};
-                typename PrimitiveTypeTraits<PType>::ColumnItemType end {11};
-                EXPECT_THROW(col_vec_target->insert_range_of_integer(begin, end), Exception);
+auto assert_column_vector_insert_range_of_integer_callback = [](auto x, const MutableColumnPtr&
+                                                                                source_column) {
+    using T = decltype(x);
+    auto target_column = source_column->clone();
+    auto src_size = source_column->size();
+    auto* col_vec_target = assert_cast<ColumnVector<PType>*>(target_column.get());
+    auto* col_vec_src = assert_cast<ColumnVector<PType>*>(source_column.get());
+    if constexpr (std::is_same_v<T, Float32> || std::is_same_v<T, Float64> || is_date_type(PType) ||
+                  PType == TYPE_TIMESTAMPTZ) {
+        typename PrimitiveTypeTraits<PType>::CppType begin;
+        typename PrimitiveTypeTraits<PType>::CppType end;
+        if constexpr (PType == TYPE_DATE || PType == TYPE_DATETIME) {
+            int64_t tmp = 0;
+            begin = binary_cast<int64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<int64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else if constexpr (PType == TYPE_DATEV2) {
+            uint32_t tmp = 0;
+            begin = binary_cast<uint32_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<uint32_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else if constexpr (PType == TYPE_DATETIMEV2 || PType == TYPE_TIMESTAMPTZ) {
+            uint64_t tmp = 0;
+            begin = binary_cast<uint64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<uint64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else {
+            begin = 0;
+            end = 11;
+        }
+        EXPECT_THROW(col_vec_target->insert_range_of_integer(begin, end), Exception);
+    } else {
+        typename PrimitiveTypeTraits<PType>::CppType begin;
+        typename PrimitiveTypeTraits<PType>::CppType end;
+        if constexpr (PType == TYPE_DATE || PType == TYPE_DATETIME) {
+            int64_t tmp = 0;
+            begin = binary_cast<int64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<int64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else if constexpr (PType == TYPE_DATEV2) {
+            uint32_t tmp = 0;
+            begin = binary_cast<uint32_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<uint32_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else if constexpr (PType == TYPE_DATETIMEV2 || PType == TYPE_TIMESTAMPTZ) {
+            uint64_t tmp = 0;
+            begin = binary_cast<uint64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+            tmp = 11;
+            end = binary_cast<uint64_t, typename PrimitiveTypeTraits<PType>::CppType>(tmp);
+        } else {
+            begin = 0;
+            end = 11;
+        }
+        col_vec_target->insert_range_of_integer(begin, end);
+        size_t j = 0;
+        for (; j < src_size; ++j) {
+            EXPECT_EQ(col_vec_target->get_element(j), col_vec_src->get_element(j));
+        }
+        for (size_t k = 0; j < col_vec_target->size(); ++j, ++k) {
+            if constexpr (PType == TYPE_DATE || PType == TYPE_DATETIME) {
+                auto v = binary_cast<VecDateTimeValue, int64_t>(col_vec_target->get_element(j));
+                auto begin_t = binary_cast<VecDateTimeValue, int64_t>(begin);
+                EXPECT_EQ(v, begin_t + k);
+            } else if constexpr (PType == TYPE_DATEV2) {
+                EXPECT_EQ(col_vec_target->get_element(j).to_date_int_val(),
+                          begin.to_date_int_val() + k);
+            } else if constexpr (PType == TYPE_DATETIMEV2 || PType == TYPE_TIMESTAMPTZ) {
+                EXPECT_EQ(col_vec_target->get_element(j).to_date_int_val(),
+                          begin.to_date_int_val() + k);
             } else {
-                T begin {0};
-                T end {11};
-                col_vec_target->insert_range_of_integer(begin, end);
-                size_t j = 0;
-                for (; j < src_size; ++j) {
-                    EXPECT_EQ(col_vec_target->get_element(j), col_vec_src->get_element(j));
-                }
-                for (size_t k = 0; j < col_vec_target->size(); ++j, ++k) {
-                    EXPECT_EQ(col_vec_target->get_element(j), begin + k);
-                }
+                EXPECT_EQ(col_vec_target->get_element(j), begin + k);
             }
-        };
+        }
+    }
+};
 template <PrimitiveType PType>
 auto assert_column_vector_insert_many_fix_len_data_callback = [](auto x, const MutableColumnPtr&
                                                                                  source_column) {
@@ -3004,7 +3054,9 @@ auto assert_column_vector_get_bool_callback = [](auto x, const MutableColumnPtr&
     auto* col_vec_src = assert_cast<ColumnVecType*>(source_column.get());
     const auto& data = col_vec_src->get_data();
     for (size_t i = 0; i != src_size; ++i) {
-        EXPECT_EQ(col_vec_src->get_bool(i), (bool)data[i]);
+        if constexpr (PType == TYPE_BOOLEAN) {
+            EXPECT_EQ(col_vec_src->get_bool(i), (bool)data[i]);
+        }
     }
 };
 template <PrimitiveType PType>
@@ -3016,7 +3068,7 @@ auto assert_column_vector_get_int64_callback = [](auto x, const MutableColumnPtr
     auto* col_vec_src = assert_cast<ColumnVecType*>(source_column.get());
     const auto& data = col_vec_src->get_data();
     for (size_t i = 0; i != src_size; ++i) {
-        if constexpr (!IsDecimalNumber<T>) {
+        if constexpr (!IsDecimalNumber<T> && !is_date_type(PType) && PType != TYPE_TIMESTAMPTZ) {
             EXPECT_EQ(col_vec_src->get_int(i), (Int64)data[i]);
         }
     }
@@ -3648,6 +3700,86 @@ auto assert_column_vector_update_crc_hashes_callback = [](const MutableColumns& 
             res.push_back(data);
         }
         std::string file_name = res_file_path.empty() ? "update_crcs_hashes" : res_file_path;
+        file_name += with_nullmap ? "_with_nullmap" : "";
+        check_or_generate_res_file(file_name, res);
+    };
+    test_func(false);
+    test_func(true);
+};
+auto assert_column_vector_update_crc32c_batch_callback = [](const MutableColumnPtr& source_column,
+                                                            const std::string& res_file_path) {
+    // Create an empty column to verify `update_hashes` functionality
+    // check update_hashes with different hashes
+    auto test_func = [&](bool with_nullmap) {
+        std::vector<std::vector<std::string>> res;
+        size_t rows = source_column->size();
+        NullMap null_map(rows, 0);
+        const uint8_t* null_data = nullptr;
+        if (with_nullmap) {
+            null_data = null_map.data();
+            std::vector<size_t> null_positions {0, rows - 1, rows / 2};
+            for (const auto& pos : null_positions) {
+                null_map[pos] = 1;
+            }
+        }
+
+        std::vector<uint32_t> crc_hash_vals(source_column->size());
+        EXPECT_NO_FATAL_FAILURE(
+                source_column->update_crc32c_batch(crc_hash_vals.data(), null_data));
+        std::vector<std::string> data;
+        for (auto val : crc_hash_vals) {
+            data.push_back(std::to_string(val));
+        }
+        res.push_back(data);
+        std::string file_name = res_file_path.empty() ? "update_crc32c_batch" : res_file_path;
+        file_name += with_nullmap ? "_with_nullmap" : "";
+        check_or_generate_res_file(file_name, res);
+    };
+    test_func(false);
+    test_func(true);
+};
+auto assert_column_vector_update_crc32c_single_callback = [](const MutableColumnPtr& source_column,
+                                                             const std::string& res_file_path) {
+    // Create an empty column to verify `update_hashes` functionality
+    // check update_hashes with different hashes
+    auto test_func = [&](bool with_nullmap) {
+        std::vector<std::vector<std::string>> res;
+        size_t rows = source_column->size();
+        NullMap null_map(rows, 0);
+        const uint8_t* null_data = nullptr;
+        if (with_nullmap) {
+            null_data = null_map.data();
+            std::vector<size_t> null_positions {0, rows - 1, rows / 2};
+            for (const auto& pos : null_positions) {
+                null_map[pos] = 1;
+            }
+        }
+
+        {
+            uint32_t crc_hash_val = 0;
+            EXPECT_NO_FATAL_FAILURE(source_column->update_crc32c_single(0, source_column->size(),
+                                                                        crc_hash_val, null_data));
+            std::vector<std::string> data;
+            data.push_back(std::to_string(crc_hash_val));
+            res.push_back(data);
+        }
+        {
+            uint32_t crc_hash_val = 0;
+            EXPECT_NO_FATAL_FAILURE(source_column->update_crc32c_single(
+                    0, source_column->size() - 1, crc_hash_val, null_data));
+            std::vector<std::string> data;
+            data.push_back(std::to_string(crc_hash_val));
+            res.push_back(data);
+        }
+        if (source_column->size() > 1) {
+            uint32_t crc_hash_val = 0;
+            EXPECT_NO_FATAL_FAILURE(source_column->update_crc32c_single(
+                    1, source_column->size() / 2, crc_hash_val, null_data));
+            std::vector<std::string> data;
+            data.push_back(std::to_string(crc_hash_val));
+            res.push_back(data);
+        }
+        std::string file_name = res_file_path.empty() ? "update_crc32c_single" : res_file_path;
         file_name += with_nullmap ? "_with_nullmap" : "";
         check_or_generate_res_file(file_name, res);
     };

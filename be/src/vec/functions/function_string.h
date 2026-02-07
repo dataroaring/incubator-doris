@@ -91,7 +91,6 @@
 
 #include "exprs/math_functions.h"
 #include "pugixml.hpp"
-#include "udf/udf.h"
 #include "util/md5.h"
 #include "util/simd/vstring_function.h"
 #include "util/sm3.h"
@@ -109,6 +108,7 @@
 #include "vec/data_types/data_type_nullable.h"
 #include "vec/data_types/data_type_number.h"
 #include "vec/data_types/data_type_string.h"
+#include "vec/exprs/function_context.h"
 #include "vec/functions/function.h"
 #include "vec/functions/function_helpers.h"
 #include "vec/utils/stringop_substring.h"
@@ -1905,7 +1905,7 @@ public:
         }
 
         for (size_t i = 0; i < input_rows_count; ++i) {
-            auto str = str_col->get_data_at(i);
+            auto str = str_col->get_data_at(content_const ? 0 : i);
             auto delimiter = delimiter_col->get_data_at(delimiter_const ? 0 : i);
             int32_t delimiter_size = delimiter.size;
 

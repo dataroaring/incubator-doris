@@ -223,7 +223,7 @@ protected:
     }
     virtual PushDownType _should_push_down_binary_predicate(
             vectorized::VectorizedFnCall* fn_call, vectorized::VExprContext* expr_ctx,
-            StringRef* constant_val, const std::set<std::string> fn_name) const {
+            vectorized::Field& constant_val, const std::set<std::string> fn_name) const {
         return PushDownType::UNACCEPTABLE;
     }
 
@@ -289,8 +289,8 @@ protected:
 
     template <PrimitiveType PrimitiveType, typename ChangeFixedValueRangeFunc>
     Status _change_value_range(bool is_equal_op, ColumnValueRange<PrimitiveType>& range,
-                               const void* value, const ChangeFixedValueRangeFunc& func,
-                               const std::string& fn_name);
+                               const vectorized::Field& value,
+                               const ChangeFixedValueRangeFunc& func, const std::string& fn_name);
 
     Status _prepare_scanners();
 
@@ -308,8 +308,9 @@ protected:
 
     Status _get_topn_filters(RuntimeState* state);
 
-    // Every time vconjunct_ctx_ptr is updated, the old ctx will be stored in this vector
-    // so that it will be destroyed uniformly at the end of the query.
+    // Stores conjuncts that have been fully pushed down to the storage layer as predicate columns.
+    // These expr contexts are kept alive to prevent their FunctionContext and constant strings
+    // from being freed prematurely.
     vectorized::VExprContextSPtrs _stale_expr_ctxs;
     vectorized::VExprContextSPtrs _common_expr_ctxs_push_down;
 
@@ -418,9 +419,6 @@ protected:
     // single scanner to avoid too many scanners which will cause lots of useless read.
     bool _should_run_serial = false;
 
-    // Every time vconjunct_ctx_ptr is updated, the old ctx will be stored in this vector
-    // so that it will be destroyed uniformly at the end of the query.
-    vectorized::VExprContextSPtrs _stale_expr_ctxs;
     vectorized::VExprContextSPtrs _common_expr_ctxs_push_down;
 
     // If sort info is set, push limit to each scanner;

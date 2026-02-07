@@ -43,23 +43,20 @@ static inline constexpr const char* int_type_name = std::is_same_v<CppT, vectori
                                                                                        : "unknown";
 
 template <typename CppT>
-constexpr bool IsCppTypeInt =
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_TINYINT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_SMALLINT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_INT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::ColumnItemType>;
+constexpr bool IsCppTypeInt = std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_TINYINT>::CppType> ||
+                              std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_SMALLINT>::CppType> ||
+                              std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_INT>::CppType> ||
+                              std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::CppType> ||
+                              std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::CppType>;
 
 template <typename CppT>
-constexpr bool IsCppTypeFloat =
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_FLOAT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_DOUBLE>::ColumnItemType>;
+constexpr bool IsCppTypeFloat = std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_FLOAT>::CppType> ||
+                                std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_DOUBLE>::CppType>;
 
 template <typename CppT>
 constexpr bool IsCppTypeNumberOrTime =
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::ColumnItemType> ||
-        IsCppTypeInt<CppT> || IsCppTypeFloat<CppT> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_TIMEV2>::ColumnItemType>;
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::CppType> || IsCppTypeInt<CppT> ||
+        IsCppTypeFloat<CppT> || std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_TIMEV2>::CppType>;
 
 template <typename T, typename FloatingType>
     requires(IsCppTypeInt<T> and IsCppTypeFloat<FloatingType>)
@@ -105,10 +102,10 @@ constexpr bool CastToIntFromWiderInt = IsCppTypeInt<FromCppT> && IsCppTypeInt<To
 
 template <typename FromCppT, typename ToCppT>
 constexpr bool CastToIntFromTimeMayOverflow =
-        std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_TIMEV2>::ColumnItemType> &&
-        (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_INT>::ColumnItemType> ||
-         std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_SMALLINT>::ColumnItemType> ||
-         std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_TINYINT>::ColumnItemType>);
+        std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_TIMEV2>::CppType> &&
+        (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_INT>::CppType> ||
+         std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_SMALLINT>::CppType> ||
+         std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_TINYINT>::CppType>);
 
 template <typename FromCppT, typename ToCppT>
 constexpr bool CastToIntCppTypeMayOverflow =
@@ -117,14 +114,14 @@ constexpr bool CastToIntCppTypeMayOverflow =
 
 template <typename CppT>
 constexpr static bool IntAllowCastFromDate =
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_INT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::ColumnItemType>;
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_INT>::CppType> ||
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::CppType> ||
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::CppType>;
 
 template <typename CppT>
 constexpr static bool IntAllowCastFromDatetime =
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::ColumnItemType> ||
-        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::ColumnItemType>;
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_BIGINT>::CppType> ||
+        std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_LARGEINT>::CppType>;
 
 template <typename CppT>
 constexpr bool IsCppTypeDate = std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_DATE>::CppType> ||
@@ -135,23 +132,15 @@ constexpr bool IsCppTypeDateTime =
         std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_DATETIME>::CppType> ||
         std::is_same_v<CppT, PrimitiveTypeTraits<TYPE_DATETIMEV2>::CppType>;
 struct CastToInt {
-    template <typename ToCppT>
+    template <bool is_strict_mode, typename ToCppT>
         requires(IsCppTypeInt<ToCppT>)
     static inline bool from_string(const StringRef& from, ToCppT& to, CastParameters& params) {
-        return std::visit(
-                [&](auto is_strict_mode) {
-                    if constexpr (is_strict_mode) {
-                        return try_read_int_text<ToCppT, true>(to, from);
-                    } else {
-                        return try_read_int_text<ToCppT, false>(to, from);
-                    }
-                },
-                vectorized::make_bool_variant(params.is_strict));
+        return try_read_int_text<ToCppT, is_strict_mode>(to, from);
     }
 
     template <typename FromCppT, typename ToCppT>
         requires(IsCppTypeInt<ToCppT> &&
-                 (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::ColumnItemType> ||
+                 (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::CppType> ||
                   std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::CppType>))
     static inline bool from_bool(FromCppT from, ToCppT& to, CastParameters& params) {
         CastUtil::static_cast_set(to, from);
@@ -319,7 +308,7 @@ struct CastToFloat {
     }
     template <typename FromCppT, typename ToCppT>
         requires(IsCppTypeFloat<ToCppT> &&
-                 (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::ColumnItemType> ||
+                 (std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::CppType> ||
                   std::is_same_v<FromCppT, PrimitiveTypeTraits<TYPE_BOOLEAN>::CppType>))
     static inline bool from_bool(const FromCppT& from, ToCppT& to, CastParameters& params) {
         CastUtil::static_cast_set(to, from);

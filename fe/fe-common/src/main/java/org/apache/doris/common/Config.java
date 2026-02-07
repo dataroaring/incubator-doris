@@ -744,6 +744,28 @@ public class Config extends ConfigBase {
             "Txn manager will reject coming txns."})
     public static int max_running_txn_num_per_db = 10000;
 
+    @ConfField(mutable = true, masterOnly = true, description = {
+            "是否将事务的 edit log 写入移到写锁之外以减少锁竞争。"
+                    + "开启后，edit log 条目在写锁内入队（FIFO 保证顺序），"
+                    + "在写锁外等待持久化完成，从而降低写锁持有时间，提高并发事务吞吐量。"
+                    + "默认开启。关闭后使用传统的锁内同步写入模式。",
+            "Whether to move transaction edit log writes outside the write lock to reduce lock contention. "
+                    + "When enabled, edit log entries are enqueued inside the write lock (FIFO preserves ordering) "
+                    + "and awaited outside the lock, reducing write lock hold time "
+                    + "and improving concurrent transaction throughput. "
+                    + "Default is true. Set to false to use the traditional in-lock synchronous write mode."})
+    public static boolean enable_txn_log_outside_lock = true;
+
+    @ConfField(mutable = true, description = {
+            "是否启用按事务级别并行发布。开启后，同一数据库内的不同事务可以在不同的执行器线程上并行完成发布，"
+                    + "而不是按数据库顺序执行。关闭后回退到按数据库路由（旧行为），同一数据库内的事务顺序发布。",
+            "Whether to enable per-transaction parallel publish. When enabled, different transactions "
+                    + "in the same database can finish publishing in parallel across executor threads, "
+                    + "instead of being serialized per database. "
+                    + "When disabled, falls back to per-database routing (old behavior) "
+                    + "where transactions within a DB are published sequentially."})
+    public static boolean enable_per_txn_publish = true;
+
     @ConfField(masterOnly = true, description = {"pending load task 执行线程数。这个配置可以限制当前等待的导入作业数。"
             + "并且应小于 `max_running_txn_num_per_db`。",
             "The pending load task executor pool size. "
@@ -1816,7 +1838,7 @@ public class Config extends ConfigBase {
             "内部表的默认压缩类型。支持的值有：LZ4, LZ4F, LZ4HC, ZLIB, ZSTD, SNAPPY, NONE。",
             "Default compression type for internal tables. Supported values: LZ4, LZ4F, LZ4HC, ZLIB, ZSTD,"
             + " SNAPPY, NONE."})
-    public static String default_compression_type = "LZ4F";
+    public static String default_compression_type = "ZSTD";
 
     /*
      * The job scheduling interval of the schema change handler.
@@ -2887,6 +2909,14 @@ public class Config extends ConfigBase {
     public static boolean enable_udf_in_load = false;
 
     @ConfField(description = {
+        "开启python_udf, 默认为true。如果该配置为false，则禁止创建和使用python_udf。在一些场景下关闭该配置可防止命令注入攻击。",
+        "Used to enable python_udf, default is true. if this configuration is false, creation and use of python_udf "
+            + "is disabled. in some scenarios it may be necessary to disable this configuration to prevent "
+            + "command injection attacks."
+    })
+    public static boolean enable_python_udf = true;
+
+    @ConfField(description = {
             "是否忽略 Image 文件中未知的模块。如果为 true，不在 PersistMetaModules.MODULE_NAMES 中的元数据模块将被忽略并跳过。"
                     + "默认为 false，如果 Image 文件中包含未知的模块，Doris 将会抛出异常。"
                     + "该参数主要用于降级操作中，老版本可以兼容新版本的 Image 文件。",
@@ -3428,17 +3458,17 @@ public class Config extends ConfigBase {
             options = {"without_warmup", "async_warmup", "sync_warmup", "peer_read_async_warmup"})
     public static String cloud_warm_up_for_rebalance_type = "async_warmup";
 
-    @ConfField(mutable = true, masterOnly = true, description = {"云上tablet均衡时，"
-            + "同一个host内预热批次的最大tablet个数，默认10", "The max number of tablets per host "
+    @ConfField(mutable = true, masterOnly = true, description = {"云上 tablet 均衡时，"
+            + "同一个 host 内预热批次的最大 tablet 个数，默认 10", "The max number of tablets per host "
             + "when batching warm-up requests during cloud tablet rebalancing, default 10"})
     public static int cloud_warm_up_batch_size = 10;
 
-    @ConfField(mutable = true, masterOnly = true, description = {"云上tablet均衡时，"
-            + "预热批次最长等待时间，单位毫秒，默认50ms", "Maximum wait time in milliseconds before a "
+    @ConfField(mutable = true, masterOnly = true, description = {"云上 tablet 均衡时，"
+            + "预热批次最长等待时间，单位毫秒，默认 50ms", "Maximum wait time in milliseconds before a "
             + "pending warm-up batch is flushed, default 50ms"})
     public static int cloud_warm_up_batch_flush_interval_ms = 50;
 
-    @ConfField(mutable = true, masterOnly = true, description = {"云上tablet均衡预热rpc异步线程池大小，默认4",
+    @ConfField(mutable = true, masterOnly = true, description = {"云上 tablet 均衡预热 rpc 异步线程池大小，默认 4",
         "Thread pool size for asynchronous warm-up RPC dispatch during cloud tablet rebalancing, default 4"})
     public static int cloud_warm_up_rpc_async_pool_size = 4;
 
@@ -3661,6 +3691,10 @@ public class Config extends ConfigBase {
             "Authorization plugin directory"})
     public static String authorization_plugins_dir = EnvUtils.getDorisHome() + "/plugins/authorization";
 
+    @ConfField(description = {"安全相关插件目录",
+            "Security plugin directory"})
+    public static String security_plugins_dir = EnvUtils.getDorisHome() + "/plugins/security";
+
     @ConfField(description = {
             "鉴权插件配置文件路径，需在 DORIS_HOME 下，默认为 conf/authorization.conf",
             "Authorization plugin configuration file path, need to be in DORIS_HOME,"
@@ -3761,6 +3795,14 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long cloud_auto_snapshot_min_interval_seconds = 3600;
 
+    @ConfField(mutable = true, description = {
+            "cluster snapshot 相关操作的最低权限要求。可选值：'root'（仅 root 用户可执行）或 'admin'（ADMIN 权限用户可执行）。默认值为 'root'。",
+            "The minimum privilege required for cluster snapshot operations. "
+                    + "Valid values: 'root' (only root user can execute)"
+                    + " or 'admin' (users with ADMIN privilege can execute). "
+                    + "Default is 'root'."})
+    public static String cluster_snapshot_min_privilege = "root";
+
     @ConfField(mutable = true)
     public static long multi_part_upload_part_size_in_bytes = 256 * 1024 * 1024L; // 256MB
     @ConfField(mutable = true)
@@ -3771,6 +3813,12 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static String aws_credentials_provider_version = "v2";
 
+    @ConfField(mutable = true, description = {
+        "用户的单个查询能使用的 FILE_CACHE 比例的软上限（取值范围 1 到 100），100表示能够使用全量 FILE_CACHE",
+        "The soft upper limit of FILE_CACHE percent that a single query of a user can use, (range: 1 to 100).",
+        "100 indicate that the full FILE_CACHE capacity can be used. "
+    })
+    public static int file_cache_query_limit_max_percent = 100;
     @ConfField(description = {
             "AWS SDK 用于调度异步重试、超时任务以及其他后台操作的线程池大小，全局共享",
             "The thread pool size used by the AWS SDK to schedule asynchronous retries, timeout tasks, "
