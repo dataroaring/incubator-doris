@@ -125,6 +125,10 @@ public:
                                 const GetCurrentMaxTxnRequest* request,
                                 GetCurrentMaxTxnResponse* response,
                                 ::google::protobuf::Closure* done) override;
+    void create_meta_sync_point(::google::protobuf::RpcController* controller,
+                                const CreateMetaSyncPointRequest* request,
+                                CreateMetaSyncPointResponse* response,
+                                ::google::protobuf::Closure* done) override;
 
     void begin_sub_txn(::google::protobuf::RpcController* controller,
                        const BeginSubTxnRequest* request, BeginSubTxnResponse* response,
@@ -143,6 +147,11 @@ public:
                                     const AbortTxnWithCoordinatorRequest* request,
                                     AbortTxnWithCoordinatorResponse* response,
                                     ::google::protobuf::Closure* done) override;
+
+    void get_prepare_txn_by_coordinator(::google::protobuf::RpcController* controller,
+                                        const GetPrepareTxnByCoordinatorRequest* request,
+                                        GetPrepareTxnByCoordinatorResponse* response,
+                                        ::google::protobuf::Closure* done) override;
 
     void clean_txn_label(::google::protobuf::RpcController* controller,
                          const CleanTxnLabelRequest* request, CleanTxnLabelResponse* response,
@@ -496,7 +505,8 @@ private:
             std::string_view instance_id, KVStats& stats);
 
     void commit_partition_internal(const PartitionRequest* request, const std::string& instance_id,
-                                   const std::vector<int64_t>& partition_ids, MetaServiceCode& code,
+                                   const std::vector<int64_t>& partition_ids,
+                                   PartitionResponse* response, MetaServiceCode& code,
                                    std::string& msg, KVStats& stats);
 
     // Wait for all pending transactions before returning, and bump up the version to the latest.
@@ -565,6 +575,13 @@ public:
         call_impl(&cloud::MetaService::get_current_max_txn_id, controller, request, response, done);
     }
 
+    void create_meta_sync_point(::google::protobuf::RpcController* controller,
+                                const CreateMetaSyncPointRequest* request,
+                                CreateMetaSyncPointResponse* response,
+                                ::google::protobuf::Closure* done) override {
+        call_impl(&cloud::MetaService::create_meta_sync_point, controller, request, response, done);
+    }
+
     void begin_sub_txn(::google::protobuf::RpcController* controller,
                        const BeginSubTxnRequest* request, BeginSubTxnResponse* response,
                        ::google::protobuf::Closure* done) override {
@@ -590,6 +607,14 @@ public:
                                     ::google::protobuf::Closure* done) override {
         call_impl(&cloud::MetaService::abort_txn_with_coordinator, controller, request, response,
                   done);
+    }
+
+    void get_prepare_txn_by_coordinator(::google::protobuf::RpcController* controller,
+                                        const GetPrepareTxnByCoordinatorRequest* request,
+                                        GetPrepareTxnByCoordinatorResponse* response,
+                                        ::google::protobuf::Closure* done) override {
+        call_impl(&cloud::MetaService::get_prepare_txn_by_coordinator, controller, request,
+                  response, done);
     }
 
     void clean_txn_label(::google::protobuf::RpcController* controller,

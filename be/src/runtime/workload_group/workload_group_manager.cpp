@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "workload_group_manager.h"
+#include "runtime/workload_group/workload_group_manager.h"
 
 #include <glog/logging.h>
 
@@ -26,8 +26,10 @@
 
 #include "common/config.h"
 #include "common/status.h"
-#include "exec/schema_scanner/schema_scanner_helper.h"
-#include "pipeline/task_scheduler.h"
+#include "core/block/block.h"
+#include "exec/pipeline/task_scheduler.h"
+#include "exec/scan/scanner_scheduler.h"
+#include "information_schema/schema_scanner_helper.h"
 #include "runtime/memory/global_memory_arbitrator.h"
 #include "runtime/memory/mem_tracker_limiter.h"
 #include "runtime/workload_group/workload_group.h"
@@ -36,8 +38,6 @@
 #include "util/pretty_printer.h"
 #include "util/threadpool.h"
 #include "util/time.h"
-#include "vec/core/block.h"
-#include "vec/exec/scan/scanner_scheduler.h"
 
 namespace doris {
 
@@ -246,7 +246,7 @@ void WorkloadGroupMgr::refresh_workload_group_memory_state() {
     }
 }
 
-void WorkloadGroupMgr::get_wg_resource_usage(vectorized::Block* block) {
+void WorkloadGroupMgr::get_wg_resource_usage(Block* block) {
     int64_t be_id = ExecEnv::GetInstance()->cluster_info()->backend_id;
     int cpu_num = CpuInfo::num_cores();
     cpu_num = cpu_num <= 0 ? 1 : cpu_num;
@@ -275,6 +275,13 @@ void WorkloadGroupMgr::refresh_workload_group_metrics() {
     std::shared_lock<std::shared_mutex> r_lock(_group_mutex);
     for (const auto& [id, wg] : _workload_groups) {
         wg->get_metrics()->refresh_metrics();
+    }
+}
+
+void WorkloadGroupMgr::update_memtable_flush_threads() {
+    std::shared_lock<std::shared_mutex> r_lock(_group_mutex);
+    for (const auto& [id, wg] : _workload_groups) {
+        wg->update_memtable_flush_threads();
     }
 }
 
@@ -871,6 +878,7 @@ void WorkloadGroupMgr::update_queries_limit_(WorkloadGroupPtr wg, bool enable_ha
 }
 
 void WorkloadGroupMgr::stop() {
+    std::shared_lock<std::shared_mutex> r_lock(_group_mutex);
     for (auto iter = _workload_groups.begin(); iter != _workload_groups.end(); iter++) {
         iter->second->try_stop_schedulers();
     }

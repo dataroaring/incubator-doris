@@ -20,7 +20,7 @@ package org.apache.doris.common.util;
 import org.apache.doris.common.UserException;
 import org.apache.doris.datasource.property.storage.AzurePropertyUtils;
 import org.apache.doris.datasource.property.storage.StorageProperties;
-import org.apache.doris.datasource.property.storage.exception.StoragePropertiesException;
+import org.apache.doris.foundation.property.StoragePropertiesException;
 import org.apache.doris.fs.FileSystemType;
 import org.apache.doris.fs.SchemaTypeMapper;
 import org.apache.doris.thrift.TFileType;
@@ -313,6 +313,10 @@ public class LocationPath {
                 && storagePropertiesMap.containsKey(StorageProperties.Type.MINIO)) {
             return storagePropertiesMap.get(StorageProperties.Type.MINIO);
         }
+        if (type == StorageProperties.Type.S3
+                && storagePropertiesMap.containsKey(StorageProperties.Type.OZONE)) {
+            return storagePropertiesMap.get(StorageProperties.Type.OZONE);
+        }
 
         // Step 3: Compatibility fallback based on schema
         // In previous configurations, the schema name may not strictly match the actual storage type.
@@ -366,6 +370,7 @@ public class LocationPath {
     }
 
     public static String getTempWritePath(String loc, String prefix) {
+        // If prefix is relative, it is resolved under loc; if absolute, it is used as the base path.
         Path tempRoot = new Path(loc, prefix);
         Path tempPath = new Path(tempRoot, UUID.randomUUID().toString().replace("-", ""));
         return tempPath.toString();

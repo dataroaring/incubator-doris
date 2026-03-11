@@ -21,11 +21,12 @@
 
 #include <memory>
 
-#include "olap/lru_cache.h"
+#include "common/be_mock_util.h"
 #include "runtime/memory/cache_policy.h"
 #include "runtime/memory/lru_cache_value_base.h"
 #include "runtime/memory/mem_tracker_limiter.h"
 #include "runtime/thread_context.h"
+#include "util/lru_cache.h"
 #include "util/time.h"
 
 namespace doris {
@@ -135,9 +136,9 @@ public:
 
     Cache::Handle* lookup(const CacheKey& key) { return _cache->lookup(key); }
 
-    void release(Cache::Handle* handle) { _cache->release(handle); }
+    MOCK_FUNCTION void release(Cache::Handle* handle) { _cache->release(handle); }
 
-    void* value(Cache::Handle* handle) { return _cache->value(handle); }
+    MOCK_FUNCTION void* value(Cache::Handle* handle) { return _cache->value(handle); }
 
     void erase(const CacheKey& key) { _cache->erase(key); }
 

@@ -488,6 +488,7 @@ struct TFileScanRangeParams {
     27: optional string paimon_predicate
     // enable mapping varbinary type for Doris external table and TVF
     28: optional bool enable_mapping_varbinary = false;
+    29: optional bool enable_mapping_timestamp_tz = false;
 }
 
 struct TFileRangeDesc {
@@ -861,6 +862,12 @@ enum TPushAggOp {
 	COUNT_ON_INDEX = 4
 }
 
+struct TScoreRangeInfo {
+  // Score range filter parameters for BM25 range queries like score() > 0.5
+  1: optional Opcodes.TExprOpcode op
+  2: optional double threshold
+}
+
 struct TOlapScanNode {
   1: required Types.TTupleId tuple_id
   2: required list<string> key_column_name
@@ -886,6 +893,7 @@ struct TOlapScanNode {
   20: optional i64 score_sort_limit
   21: optional TSortInfo ann_sort_info
   22: optional i64 ann_sort_limit
+  23: optional TScoreRangeInfo score_range_info
 }
 
 struct TEqJoinCondition {
@@ -1295,6 +1303,7 @@ struct TOlapRewriteNode {
 struct TTableFunctionNode {
     1: optional list<Exprs.TExpr> fnCallExprList
     2: optional list<Types.TSlotId> outputSlotIds
+    3: optional list<Exprs.TExpr> expand_conjuncts
 }
 
 // This contains all of the information computed by the plan as part of the resource

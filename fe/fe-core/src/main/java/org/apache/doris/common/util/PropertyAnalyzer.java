@@ -259,6 +259,7 @@ public class PropertyAnalyzer {
     public static final String PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT = "variant_max_subcolumns_count";
 
     public static final String PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE = "variant_enable_typed_paths_to_sparse";
+    public static final String PROPERTIES_VARIANT_ENABLE_NESTED_GROUP = "variant_enable_nested_group";
     public static final String PROPERTIES_TDE_ALGORITHM = "tde_algorithm";
     public static final String AES256 = "AES256";
     public static final String SM4 = "SM4";
@@ -268,6 +269,14 @@ public class PropertyAnalyzer {
             "variant_max_sparse_column_statistics_size";
     // number of buckets when using bucketized sparse serialization
     public static final String PROPERTIES_VARIANT_SPARSE_HASH_SHARD_COUNT = "variant_sparse_hash_shard_count";
+
+    public static final String PROPERTIES_VARIANT_ENABLE_DOC_MODE = "variant_enable_doc_mode";
+
+    public static final String PROPERTIES_VARIANT_DOC_MATERIALIZATION_MIN_ROWS =
+            "variant_doc_materialization_min_rows";
+
+    // number of buckets when using doc snapshot serialization
+    public static final String PROPERTIES_VARIANT_DOC_HASH_SHARD_COUNT = "variant_doc_hash_shard_count";
 
     public enum RewriteType {
         PUT,      // always put property
@@ -1848,11 +1857,11 @@ public class PropertyAnalyzer {
      * 1000
      *
      * @param properties
-     * @param defaultValue
      * @return
      * @throws AnalysisException
      */
-    public static int analyzeGroupCommitIntervalMs(Map<String, String> properties) throws AnalysisException {
+    public static int analyzeGroupCommitIntervalMs(Map<String, String> properties, boolean removeProperty)
+            throws AnalysisException {
         int groupCommitIntervalMs = PROPERTIES_GROUP_COMMIT_INTERVAL_MS_DEFAULT_VALUE;
         if (properties != null && properties.containsKey(PROPERTIES_GROUP_COMMIT_INTERVAL_MS)) {
             String groupIntervalCommitMsStr = properties.get(PROPERTIES_GROUP_COMMIT_INTERVAL_MS);
@@ -1861,24 +1870,35 @@ public class PropertyAnalyzer {
             } catch (Exception e) {
                 throw new AnalysisException("parse group_commit_interval_ms format error");
             }
+            if (groupCommitIntervalMs <= 0) {
+                throw new AnalysisException("group_commit_interval_ms must be greater than 0");
+            }
 
-            properties.remove(PROPERTIES_GROUP_COMMIT_INTERVAL_MS);
+            if (removeProperty) {
+                properties.remove(PROPERTIES_GROUP_COMMIT_INTERVAL_MS);
+            }
         }
 
         return groupCommitIntervalMs;
     }
 
-    public static int analyzeGroupCommitDataBytes(Map<String, String> properties) throws AnalysisException {
+    public static int analyzeGroupCommitDataBytes(Map<String, String> properties, boolean removeProperty)
+            throws AnalysisException {
         int groupCommitDataBytes = PROPERTIES_GROUP_COMMIT_DATA_BYTES_DEFAULT_VALUE;
         if (properties != null && properties.containsKey(PROPERTIES_GROUP_COMMIT_DATA_BYTES)) {
             String groupIntervalCommitDataBytesStr = properties.get(PROPERTIES_GROUP_COMMIT_DATA_BYTES);
             try {
                 groupCommitDataBytes = Integer.parseInt(groupIntervalCommitDataBytesStr);
             } catch (Exception e) {
-                throw new AnalysisException("parse group_commit_interval_ms format error");
+                throw new AnalysisException("parse group_commit_data_bytes format error");
+            }
+            if (groupCommitDataBytes <= 0) {
+                throw new AnalysisException("group_commit_data_bytes must be greater than 0");
             }
 
-            properties.remove(PROPERTIES_GROUP_COMMIT_DATA_BYTES);
+            if (removeProperty) {
+                properties.remove(PROPERTIES_GROUP_COMMIT_DATA_BYTES);
+            }
         }
 
         return groupCommitDataBytes;
@@ -2055,6 +2075,21 @@ public class PropertyAnalyzer {
         return enableTypedPathsToSparse;
     }
 
+    public static boolean analyzeEnableNestedGroup(Map<String, String> properties,
+                        boolean defaultValue) throws AnalysisException {
+        boolean enableNestedGroup = defaultValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_ENABLE_NESTED_GROUP)) {
+            String enableNestedGroupStr = properties.get(PROPERTIES_VARIANT_ENABLE_NESTED_GROUP);
+            try {
+                enableNestedGroup = Boolean.parseBoolean(enableNestedGroupStr);
+            } catch (Exception e) {
+                throw new AnalysisException("variant_enable_nested_group must be `true` or `false`");
+            }
+            properties.remove(PROPERTIES_VARIANT_ENABLE_NESTED_GROUP);
+        }
+        return enableNestedGroup;
+    }
+
     public static int analyzeVariantMaxSparseColumnStatisticsSize(Map<String, String> properties, int defuatValue)
                                                                                 throws AnalysisException {
         int maxSparseColumnStatisticsSize = defuatValue;
@@ -2092,6 +2127,99 @@ public class PropertyAnalyzer {
             properties.remove(PROPERTIES_VARIANT_SPARSE_HASH_SHARD_COUNT);
         }
         return bucketNum;
+    }
+
+    public static boolean analyzeEnableVariantDocMode(Map<String, String> properties, boolean defaultValue)
+                                                                                throws AnalysisException {
+        boolean enableVariantDocMode = defaultValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_ENABLE_DOC_MODE)) {
+            String enableVariantDocModeStr = properties.get(PROPERTIES_VARIANT_ENABLE_DOC_MODE);
+            try {
+                enableVariantDocMode = Boolean.parseBoolean(enableVariantDocModeStr);
+            } catch (Exception e) {
+                throw new AnalysisException("variant_enable_doc_mode must be `true` or `false`");
+            }
+            properties.remove(PROPERTIES_VARIANT_ENABLE_DOC_MODE);
+        }
+        return enableVariantDocMode;
+    }
+
+    public static long analyzeVariantDocMaterializationMinRows(Map<String, String> properties,
+                                                               long defaultValue)
+                                                                                throws AnalysisException {
+        long minRows = defaultValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_DOC_MATERIALIZATION_MIN_ROWS)) {
+            String minRowsStr = properties.get(PROPERTIES_VARIANT_DOC_MATERIALIZATION_MIN_ROWS);
+            try {
+                minRows = Long.parseLong(minRowsStr);
+                if (minRows < 0 || minRows > 1_000_000_000) {
+                    throw new AnalysisException(
+                            "variant_doc_materialization_min_rows must between 0 and 1000000000 ");
+                }
+            } catch (Exception e) {
+                throw new AnalysisException(
+                        "variant_doc_materialization_min_rows format error:" + e.getMessage());
+            }
+            properties.remove(PROPERTIES_VARIANT_DOC_MATERIALIZATION_MIN_ROWS);
+        }
+        return minRows;
+    }
+
+    public static int analyzeVariantDocHashShardCount(Map<String, String> properties, int defaultValue)
+            throws AnalysisException {
+        int shardCount = defaultValue;
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_DOC_HASH_SHARD_COUNT)) {
+            String shardCountStr = properties.get(PROPERTIES_VARIANT_DOC_HASH_SHARD_COUNT);
+            try {
+                shardCount = Integer.parseInt(shardCountStr);
+                if (shardCount < 0 || shardCount > 1024) {
+                    throw new AnalysisException("variant_doc_hash_shard_count must between 0 and 1024 ");
+                }
+            } catch (Exception e) {
+                throw new AnalysisException(
+                        "variant_doc_hash_shard_count format error:" + e.getMessage());
+            }
+            properties.remove(PROPERTIES_VARIANT_DOC_HASH_SHARD_COUNT);
+        }
+        return shardCount;
+    }
+
+    public static void validateVariantProperties(Map<String, String> properties) throws AnalysisException {
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_ENABLE_DOC_MODE)) {
+            if (properties.containsKey(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT)) {
+                throw new AnalysisException("variant_max_subcolumns_count and variant_enable_doc_mode "
+                        + "cannot be set together");
+            }
+            if (properties.containsKey(PROPERTIES_VARIANT_ENABLE_TYPED_PATHS_TO_SPARSE)) {
+                throw new AnalysisException("variant_enable_typed_paths_to_sparse and variant_enable_doc_mode "
+                        + "cannot be set together");
+            }
+            if (properties.containsKey(PROPERTIES_VARIANT_MAX_SPARSE_COLUMN_STATISTICS_SIZE)) {
+                throw new AnalysisException("variant_max_sparse_column_statistics_size and variant_enable_doc_mode "
+                        + "cannot be set together");
+            }
+            if (properties.containsKey(PROPERTIES_VARIANT_SPARSE_HASH_SHARD_COUNT)) {
+                throw new AnalysisException("variant_sparse_hash_shard_count and variant_enable_doc_mode "
+                        + "cannot be set together");
+            }
+        }
+        // variant_enable_nested_group=true is mutually exclusive with
+        // variant_enable_doc_mode=true and variant_max_subcolumns_count>0
+        if (properties != null && properties.containsKey(PROPERTIES_VARIANT_ENABLE_NESTED_GROUP)
+                && "true".equalsIgnoreCase(properties.get(PROPERTIES_VARIANT_ENABLE_NESTED_GROUP))) {
+            if (properties.containsKey(PROPERTIES_VARIANT_ENABLE_DOC_MODE)
+                    && "true".equalsIgnoreCase(properties.get(PROPERTIES_VARIANT_ENABLE_DOC_MODE))) {
+                throw new AnalysisException("variant_enable_nested_group and variant_enable_doc_mode "
+                        + "cannot both be true");
+            }
+            if (properties.containsKey(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT)) {
+                int count = Integer.parseInt(properties.get(PROPERTIES_VARIANT_MAX_SUBCOLUMNS_COUNT));
+                if (count > 0) {
+                    throw new AnalysisException("variant_enable_nested_group cannot be true when "
+                            + "variant_max_subcolumns_count > 0");
+                }
+            }
+        }
     }
 
     public static TEncryptionAlgorithm analyzeTDEAlgorithm(Map<String, String> properties) throws AnalysisException {

@@ -35,6 +35,7 @@ import org.apache.doris.common.util.BrokerUtil;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.hive.source.HiveSplit;
 import org.apache.doris.planner.PlanNodeId;
+import org.apache.doris.planner.ScanContext;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.StmtExecutor;
@@ -68,6 +69,7 @@ import org.apache.logging.log4j.Logger;
 import java.net.URI;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -103,8 +105,8 @@ public abstract class FileQueryScanNode extends FileScanNode {
      * These scan nodes do not have corresponding catalog/database/table info, so no need to do priv check
      */
     public FileQueryScanNode(PlanNodeId id, TupleDescriptor desc, String planNodeName,
-            boolean needCheckColumnPriv, SessionVariable sv) {
-        super(id, desc, planNodeName, needCheckColumnPriv);
+            ScanContext scanContext, boolean needCheckColumnPriv, SessionVariable sv) {
+        super(id, desc, planNodeName, scanContext, needCheckColumnPriv);
         this.sessionVariable = sv;
     }
 
@@ -163,6 +165,7 @@ public abstract class FileQueryScanNode extends FileScanNode {
         params.setSrcTupleId(-1);
         // Set enable_mapping_varbinary from catalog or TVF
         params.setEnableMappingVarbinary(getEnableMappingVarbinary());
+        params.setEnableMappingTimestampTz(getEnableMappingTimestampTz());
     }
 
     private void updateRequiredSlots() throws UserException {
@@ -217,6 +220,14 @@ public abstract class FileQueryScanNode extends FileScanNode {
             params.setColumnIdxs(columnIdxs);
             return;
         }
+
+        // Pre-index columns into a Map for O(1) lookup
+        List<Column> columns = getColumns();
+        Map<String, Integer> columnNameMap = new HashMap<>(columns.size());
+        for (int i = 0; i < columns.size(); i++) {
+            columnNameMap.putIfAbsent(columns.get(i).getName(), i);
+        }
+
         for (TFileScanSlotInfo slot : params.getRequiredSlots()) {
             if (!slot.isIsFileSlot()) {
                 continue;
@@ -227,15 +238,8 @@ public abstract class FileQueryScanNode extends FileScanNode {
                 continue;
             }
 
-            int idx = -1;
-            List<Column> columns = getColumns();
-            for (int i = 0; i < columns.size(); i++) {
-                if (columns.get(i).getName().equals(colName)) {
-                    idx = i;
-                    break;
-                }
-            }
-            if (idx == -1) {
+            Integer idx = columnNameMap.get(colName);
+            if (idx == null) {
                 throw new UserException("Column " + colName + " not found in table " + tbl.getName());
             }
             columnIdxs.add(idx);
@@ -534,7 +538,7 @@ public abstract class FileQueryScanNode extends FileScanNode {
     @Override
     public int getNumInstances() {
         if (sessionVariable.isIgnoreStorageDataDistribution()) {
-            return sessionVariable.getParallelExecInstanceNum();
+            return sessionVariable.getParallelExecInstanceNum(scanContext.getClusterName());
         }
         return scanRangeLocations.size();
     }
@@ -574,6 +578,30 @@ public abstract class FileQueryScanNode extends FileScanNode {
             }
         } catch (Exception e) {
             LOG.info("Failed to get enable_mapping_varbinary from catalog, use default value false. Error: {}",
+                    e.getMessage());
+        }
+        return false;
+    }
+
+    protected boolean getEnableMappingTimestampTz() {
+        try {
+            TableIf table = getTargetTable();
+            // For External Catalog tables get from catalog properties
+            if (table instanceof ExternalTable) {
+                ExternalTable externalTable = (ExternalTable) table;
+                CatalogIf<?> catalog = externalTable.getCatalog();
+                if (catalog instanceof ExternalCatalog) {
+                    return ((ExternalCatalog) catalog).getEnableMappingTimestampTz();
+                }
+            }
+            // For TVF read directly from fileFormatProperties
+            if (table instanceof FunctionGenTable) {
+                FunctionGenTable functionGenTable = (FunctionGenTable) table;
+                ExternalFileTableValuedFunction tvf = (ExternalFileTableValuedFunction) functionGenTable.getTvf();
+                return tvf.fileFormatProperties.enableMappingTimestampTz;
+            }
+        } catch (Exception e) {
+            LOG.info("Failed to get enable_mapping_timestamp_tz from catalog, use default value false. Error: {}",
                     e.getMessage());
         }
         return false;
@@ -621,5 +649,14 @@ public abstract class FileQueryScanNode extends FileScanNode {
             return scan;
         }
         return this.scanParams;
+    }
+
+    protected long applyMaxFileSplitNumLimit(long targetSplitSize, long totalFileSize) {
+        int maxFileSplitNum = sessionVariable.getMaxFileSplitNum();
+        if (maxFileSplitNum <= 0 || totalFileSize <= 0) {
+            return targetSplitSize;
+        }
+        long minSplitSizeForMaxNum = (totalFileSize + maxFileSplitNum - 1L) / (long) maxFileSplitNum;
+        return Math.max(targetSplitSize, minSplitSizeForMaxNum);
     }
 }

@@ -20,7 +20,6 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.RecursiveCteTempTable;
 import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.IdGenerator;
 import org.apache.doris.thrift.TDescriptorTable;
@@ -33,7 +32,7 @@ import java.util.Map;
 /**
  * Repository for tuple (and slot) descriptors.
  * Descriptors should only be created through this class, which assigns
- * them unique ids..
+ * them unique ids.
  */
 public class DescriptorTable {
     private final HashMap<TupleId, TupleDescriptor> tupleDescs = new HashMap<TupleId, TupleDescriptor>();
@@ -51,25 +50,9 @@ public class DescriptorTable {
         return d;
     }
 
-    public TupleDescriptor createTupleDescriptor(String debugName) {
-        TupleDescriptor d = new TupleDescriptor(tupleIdGenerator.getNextId(), debugName);
-        tupleDescs.put(d.getId(), d);
-        return d;
-    }
-
     public SlotDescriptor addSlotDescriptor(TupleDescriptor d) {
         SlotDescriptor result = new SlotDescriptor(slotIdGenerator.getNextId(), d);
         d.addSlot(result);
-        slotDescs.put(result.getId(), result);
-        return result;
-    }
-
-    /**
-     * Append copy of src to dest.
-     */
-    public SlotDescriptor copySlotDescriptor(TupleDescriptor dest, SlotDescriptor src) {
-        SlotDescriptor result = new SlotDescriptor(slotIdGenerator.getNextId(), dest, src);
-        dest.addSlot(result);
         slotDescs.put(result.getId(), result);
         return result;
     }
@@ -101,10 +84,6 @@ public class DescriptorTable {
         }
 
         for (TableIf tbl : referencedTbls.values()) {
-            if (tbl instanceof RecursiveCteTempTable) {
-                // skip recursive cte temp table
-                continue;
-            }
             result.addToTableDescriptors(tbl.toThrift());
         }
         thriftDescTable = result;

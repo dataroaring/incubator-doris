@@ -17,8 +17,6 @@
 
 package org.apache.doris.nereids.rules.rewrite;
 
-import org.apache.doris.common.util.DebugUtil;
-import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.jobs.JobContext;
 import org.apache.doris.nereids.properties.OrderKey;
 import org.apache.doris.nereids.trees.expressions.Alias;
@@ -41,7 +39,6 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPartitionTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalProject;
-import org.apache.doris.nereids.trees.plans.logical.LogicalRecursiveCte;
 import org.apache.doris.nereids.trees.plans.logical.LogicalRepeat;
 import org.apache.doris.nereids.trees.plans.logical.LogicalSetOperation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalSink;
@@ -53,6 +50,7 @@ import org.apache.doris.nereids.trees.plans.visitor.CustomRewriter;
 import org.apache.doris.nereids.trees.plans.visitor.DefaultPlanRewriter;
 import org.apache.doris.nereids.util.ExpressionUtils;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.SessionVariable;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -60,8 +58,6 @@ import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -75,9 +71,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * So, we need add a rule to adjust all expression's nullable attribute after rewrite.
  */
 public class AdjustNullable extends DefaultPlanRewriter<Map<ExprId, Slot>> implements CustomRewriter {
-
-    private static final Logger LOG = LogManager.getLogger(AdjustNullable.class);
-
     private final boolean isAnalyzedPhase;
 
     public AdjustNullable(boolean isAnalyzedPhase) {
@@ -291,53 +284,6 @@ public class AdjustNullable extends DefaultPlanRewriter<Map<ExprId, Slot>> imple
     }
 
     @Override
-    public Plan visitLogicalRecursiveCte(LogicalRecursiveCte recursiveCte, Map<ExprId, Slot> replaceMap) {
-        recursiveCte = (LogicalRecursiveCte) super.visit(recursiveCte, replaceMap);
-        ImmutableList.Builder<List<SlotReference>> newChildrenOutputs = ImmutableList.builder();
-        List<Boolean> inputNullable = null;
-        if (!recursiveCte.children().isEmpty()) {
-            inputNullable = Lists.newArrayListWithCapacity(recursiveCte.getOutputs().size());
-            for (int i = 0; i < recursiveCte.getOutputs().size(); i++) {
-                inputNullable.add(false);
-            }
-            for (int i = 0; i < recursiveCte.arity(); i++) {
-                List<Slot> childOutput = recursiveCte.child(i).getOutput();
-                List<SlotReference> setChildOutput = recursiveCte.getRegularChildOutput(i);
-                ImmutableList.Builder<SlotReference> newChildOutputs = ImmutableList.builder();
-                for (int j = 0; j < setChildOutput.size(); j++) {
-                    for (Slot slot : childOutput) {
-                        if (slot.getExprId().equals(setChildOutput.get(j).getExprId())) {
-                            inputNullable.set(j, slot.nullable() || inputNullable.get(j));
-                            newChildOutputs.add((SlotReference) slot);
-                            break;
-                        }
-                    }
-                }
-                newChildrenOutputs.add(newChildOutputs.build());
-            }
-        }
-        if (inputNullable == null) {
-            // this is a fail-safe
-            // means there is no children and having no getConstantExprsList
-            // no way to update the nullable flag, so just do nothing
-            return recursiveCte;
-        }
-        List<NamedExpression> outputs = recursiveCte.getOutputs();
-        List<NamedExpression> newOutputs = Lists.newArrayListWithCapacity(outputs.size());
-        for (int i = 0; i < inputNullable.size(); i++) {
-            NamedExpression ne = outputs.get(i);
-            Slot slot = ne instanceof Alias ? (Slot) ((Alias) ne).child() : (Slot) ne;
-            slot = slot.withNullable(inputNullable.get(i));
-            NamedExpression newOutput = ne instanceof Alias ? (NamedExpression) ne.withChildren(slot) : slot;
-            newOutputs.add(newOutput);
-            replaceMap.put(newOutput.getExprId(), newOutput.toSlot());
-        }
-        return recursiveCte.withNewOutputs(newOutputs)
-                .withChildrenAndTheirOutputs(recursiveCte.children(), newChildrenOutputs.build())
-                .recomputeLogicalProperties();
-    }
-
-    @Override
     public Plan visitLogicalSetOperation(LogicalSetOperation setOperation, Map<ExprId, Slot> replaceMap) {
         setOperation = (LogicalSetOperation) super.visit(setOperation, replaceMap);
         ImmutableList.Builder<List<SlotReference>> newChildrenOutputs = ImmutableList.builder();
@@ -533,14 +479,9 @@ public class AdjustNullable extends DefaultPlanRewriter<Map<ExprId, Slot>> imple
                 // repeat may check fail.
                 if (!slotReference.nullable() && newSlotReference.nullable()
                         && check && ConnectContext.get() != null) {
-                    if (ConnectContext.get().getSessionVariable().feDebug) {
-                        throw new AnalysisException("AdjustNullable convert slot " + slotReference
-                                + " from not-nullable to nullable. You can disable check by set fe_debug = false.");
-                    } else {
-                        LOG.warn("adjust nullable convert slot '" + slotReference
-                                + "' from not-nullable to nullable for query "
-                                + DebugUtil.printId(ConnectContext.get().queryId()));
-                    }
+                    SessionVariable.throwAnalysisExceptionWhenFeDebug("AdjustNullable convert slot "
+                            + slotReference
+                            + " from not-nullable to nullable. You can disable check by set fe_debug = false.");
                 }
                 return newSlotReference;
             } else {

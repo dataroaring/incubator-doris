@@ -25,7 +25,10 @@ import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.util.SmallFileMgr;
+import org.apache.doris.common.util.SmallFileMgr.SmallFile;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.datasource.jdbc.client.JdbcClient;
 import org.apache.doris.datasource.jdbc.client.JdbcClientConfig;
@@ -33,6 +36,7 @@ import org.apache.doris.job.cdc.DataSourceConfigKeys;
 import org.apache.doris.job.cdc.split.SnapshotSplit;
 import org.apache.doris.job.common.DataSourceType;
 import org.apache.doris.job.exception.JobException;
+import org.apache.doris.job.extensions.insert.streaming.StreamingInsertJob;
 import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
 import org.apache.doris.nereids.trees.plans.commands.info.ColumnDefinition;
 import org.apache.doris.nereids.trees.plans.commands.info.CreateTableInfo;
@@ -70,7 +74,6 @@ import java.util.stream.Collectors;
 
 @Log4j2
 public class StreamingJobUtils {
-    public static final String TABLE_PROPS_PREFIX = "table.create.properties.";
     public static final String INTERNAL_STREAMING_JOB_META_TABLE_NAME = "streaming_job_meta";
     public static final String FULL_QUALIFIED_META_TBL_NAME = InternalCatalog.INTERNAL_CATALOG_NAME
             + "." + FeConstants.INTERNAL_DB_NAME + "." + INTERNAL_STREAMING_JOB_META_TABLE_NAME;
@@ -120,7 +123,7 @@ public class StreamingJobUtils {
         }
     }
 
-    public static Map<String, List<SnapshotSplit>> restoreSplitsToJob(Long jobId) throws IOException {
+    public static Map<String, List<SnapshotSplit>> restoreSplitsToJob(Long jobId) throws JobException {
         List<ResultRow> resultRows;
         String sql = String.format(SELECT_SPLITS_TABLE_TEMPLATE, jobId);
         try (AutoCloseConnectContext context
@@ -130,12 +133,17 @@ public class StreamingJobUtils {
         }
 
         Map<String, List<SnapshotSplit>> tableSplits = new LinkedHashMap<>();
-        for (ResultRow row : resultRows) {
-            String tableName = row.get(0);
-            String chunkListStr = row.get(1);
-            List<SnapshotSplit> splits =
-                    new ArrayList<>(Arrays.asList(objectMapper.readValue(chunkListStr, SnapshotSplit[].class)));
-            tableSplits.put(tableName, splits);
+        try {
+            for (ResultRow row : resultRows) {
+                String tableName = row.get(0);
+                String chunkListStr = row.get(1);
+                List<SnapshotSplit> splits =
+                        new ArrayList<>(Arrays.asList(objectMapper.readValue(chunkListStr, SnapshotSplit[].class)));
+                tableSplits.put(tableName, splits);
+            }
+        } catch (IOException ex) {
+            log.warn("Failed to deserialize snapshot splits from job {} meta table: {}", jobId, ex.getMessage());
+            throw new JobException(ex);
         }
         return tableSplits;
     }
@@ -239,6 +247,32 @@ public class StreamingJobUtils {
         int index = lastSelectedBackendIndex;
         lastSelectedBackendIndex = (index >= Integer.MAX_VALUE - 1) ? 0 : index + 1;
         return index;
+    }
+
+    /**
+     * When enabling SSL, you need to convert FILE:ca.pem to FILE:ca.pem:md5.
+     */
+    public static Map<String, String> convertCertFile(long dbId, Map<String, String> sourceProperties)
+            throws JobException {
+        SmallFileMgr smallFileMgr = Env.getCurrentEnv().getSmallFileMgr();
+        Map<String, String> newProps = new HashMap<>(sourceProperties);
+        if (sourceProperties.containsKey(DataSourceConfigKeys.SSL_ROOTCERT)) {
+            String certFile = sourceProperties.get(DataSourceConfigKeys.SSL_ROOTCERT);
+            if (certFile.startsWith("FILE:")) {
+                String file = certFile.substring(certFile.indexOf(":") + 1);
+                try {
+                    SmallFile smallFile =
+                            smallFileMgr.getSmallFile(dbId, StreamingInsertJob.JOB_FILE_CATALOG, file, true);
+                    newProps.put(DataSourceConfigKeys.SSL_ROOTCERT, "FILE:" + smallFile.id + ":" + smallFile.md5);
+                } catch (DdlException ex) {
+                    throw new JobException("ssl root cert file not found: " + certFile, ex);
+                }
+            } else {
+                throw new JobException("ssl root cert is not in expected format, "
+                        + "should start with FILE:, got " + certFile);
+            }
+        }
+        return newProps;
     }
 
     public static List<CreateTableCommand> generateCreateTableCmds(String targetDb, DataSourceType sourceType,
@@ -350,6 +384,14 @@ public class StreamingJobUtils {
                 } else {
                     col.setType(ScalarType.createVarcharType(len));
                 }
+            } else if (col.getType().isChar()) {
+                // The length of char needs to be multiplied by 3.
+                int len = col.getType().getLength() * 3;
+                if (len > ScalarType.MAX_CHAR_LENGTH) {
+                    col.setType(ScalarType.createVarcharType(len));
+                } else {
+                    col.setType(ScalarType.createCharType(len));
+                }
             }
 
             // string can not to be key
@@ -398,8 +440,8 @@ public class StreamingJobUtils {
     private static Map<String, String> getTableCreateProperties(Map<String, String> properties) {
         final Map<String, String> tableCreateProps = new HashMap<>();
         for (Map.Entry<String, String> entry : properties.entrySet()) {
-            if (entry.getKey().startsWith(TABLE_PROPS_PREFIX)) {
-                String subKey = entry.getKey().substring(TABLE_PROPS_PREFIX.length());
+            if (entry.getKey().startsWith(DataSourceConfigKeys.TABLE_PROPS_PREFIX)) {
+                String subKey = entry.getKey().substring(DataSourceConfigKeys.TABLE_PROPS_PREFIX.length());
                 tableCreateProps.put(subKey, entry.getValue());
             }
         }

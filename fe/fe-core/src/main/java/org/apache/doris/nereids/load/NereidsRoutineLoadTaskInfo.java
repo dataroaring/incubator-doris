@@ -18,10 +18,10 @@
 package org.apache.doris.nereids.load;
 
 import org.apache.doris.analysis.Separator;
+import org.apache.doris.catalog.info.PartitionNamesInfo;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.datasource.property.fileformat.CsvFileFormatProperties;
-import org.apache.doris.info.PartitionNamesInfo;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.plans.commands.LoadCommand;
@@ -80,8 +80,8 @@ public class NereidsRoutineLoadTaskInfo implements NereidsLoadTaskInfo {
             String sequenceCol, double maxFilterRatio, NereidsImportColumnDescs columnDescs,
             Expression precedingFilter, Expression whereExpr, Separator columnSeparator,
             Separator lineDelimiter, byte enclose, byte escape, int sendBatchParallelism,
-            boolean loadToSingleTablet, boolean isPartialUpdate, TPartialUpdateNewRowPolicy partialUpdateNewKeyPolicy,
-            boolean memtableOnSinkNode) {
+            boolean loadToSingleTablet, TUniqueKeyUpdateMode uniqueKeyUpdateMode,
+            TPartialUpdateNewRowPolicy partialUpdateNewKeyPolicy, boolean memtableOnSinkNode) {
         this.execMemLimit = execMemLimit;
         this.jobProperties = jobProperties;
         this.maxBatchIntervalS = maxBatchIntervalS;
@@ -99,9 +99,7 @@ public class NereidsRoutineLoadTaskInfo implements NereidsLoadTaskInfo {
         this.escape = escape;
         this.sendBatchParallelism = sendBatchParallelism;
         this.loadToSingleTablet = loadToSingleTablet;
-        if (isPartialUpdate) {
-            this.uniquekeyUpdateMode = TUniqueKeyUpdateMode.UPDATE_FIXED_COLUMNS;
-        }
+        this.uniquekeyUpdateMode = uniqueKeyUpdateMode;
         this.partialUpdateNewKeyPolicy = partialUpdateNewKeyPolicy;
         this.memtableOnSinkNode = memtableOnSinkNode;
         this.timeoutSec = calTimeoutSec();

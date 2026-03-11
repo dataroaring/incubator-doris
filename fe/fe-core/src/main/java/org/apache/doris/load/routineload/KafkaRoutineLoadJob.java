@@ -17,7 +17,9 @@
 
 package org.apache.doris.load.routineload;
 
+import org.apache.doris.analysis.ExprToSqlVisitor;
 import org.apache.doris.analysis.ImportColumnDesc;
+import org.apache.doris.analysis.ToSqlParams;
 import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
@@ -729,7 +731,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
 
     private void modifyPropertiesInternal(Map<String, String> jobProperties,
                                           KafkaDataSourceProperties dataSourceProperties)
-            throws DdlException {
+            throws UserException {
         if (null != dataSourceProperties) {
             List<Pair<Integer, Long>> kafkaPartitionOffsets = Lists.newArrayList();
             Map<String, String> customKafkaProperties = Maps.newHashMap();
@@ -830,7 +832,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     public void replayModifyProperties(AlterRoutineLoadJobOperationLog log) {
         try {
             modifyPropertiesInternal(log.getJobProperties(), (KafkaDataSourceProperties) log.getDataSourceProperties());
-        } catch (DdlException e) {
+        } catch (UserException e) {
             // should not happen
             LOG.error("failed to replay modify kafka routine load job: {}", id, e);
         }
@@ -953,20 +955,26 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     @Override
     public NereidsRoutineLoadTaskInfo toNereidsRoutineLoadTaskInfo() throws UserException {
         Expression deleteCondition = getDeleteCondition() != null
-                ? NereidsLoadUtils.parseExpressionSeq(getDeleteCondition().toSql()).get(0)
+                ? NereidsLoadUtils.parseExpressionSeq(
+                        getDeleteCondition().accept(ExprToSqlVisitor.INSTANCE,
+                                ToSqlParams.WITHOUT_TABLE)).get(0)
                 : null;
         Expression precedingFilter = getPrecedingFilter() != null
-                ? NereidsLoadUtils.parseExpressionSeq(getPrecedingFilter().toSql()).get(0)
+                ? NereidsLoadUtils.parseExpressionSeq(
+                        getPrecedingFilter().accept(ExprToSqlVisitor.INSTANCE,
+                                ToSqlParams.WITHOUT_TABLE)).get(0)
                 : null;
         Expression whereExpr = getWhereExpr() != null
-                ? NereidsLoadUtils.parseExpressionSeq(getWhereExpr().toSqlWithoutTbl()).get(0)
+                ? NereidsLoadUtils.parseExpressionSeq(getWhereExpr().accept(
+                ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE)).get(0)
                 : null;
         NereidsLoadTaskInfo.NereidsImportColumnDescs importColumnDescs = null;
         if (columnDescs != null) {
             importColumnDescs = new NereidsLoadTaskInfo.NereidsImportColumnDescs();
             for (ImportColumnDesc desc : columnDescs.descs) {
                 Expression expression = desc.getExpr() != null
-                        ? NereidsLoadUtils.parseExpressionSeq(desc.getExpr().toSqlWithoutTbl()).get(0)
+                        ? NereidsLoadUtils.parseExpressionSeq(desc.getExpr().accept(
+                        ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE)).get(0)
                         : null;
                 importColumnDescs.descs.add(new NereidsImportColumnDesc(desc.getColumnName(), expression));
             }
@@ -974,6 +982,6 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         return new NereidsRoutineLoadTaskInfo(execMemLimit, new HashMap<>(jobProperties), maxBatchIntervalS,
                 partitionNamesInfo, mergeType, deleteCondition, sequenceCol, maxFilterRatio, importColumnDescs,
                 precedingFilter, whereExpr, columnSeparator, lineDelimiter, enclose, escape, sendBatchParallelism,
-                loadToSingleTablet, isPartialUpdate, partialUpdateNewKeyPolicy, memtableOnSinkNode);
+                loadToSingleTablet, uniqueKeyUpdateMode, partialUpdateNewKeyPolicy, memtableOnSinkNode);
     }
 }
