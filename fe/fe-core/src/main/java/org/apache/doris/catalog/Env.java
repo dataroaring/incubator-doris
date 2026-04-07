@@ -30,6 +30,8 @@ import org.apache.doris.analysis.ExprToSqlVisitor;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.ToSqlParams;
 import org.apache.doris.authentication.AuthenticationIntegrationMgr;
+import org.apache.doris.authentication.AuthenticationIntegrationRuntime;
+import org.apache.doris.authentication.RoleMappingMgr;
 import org.apache.doris.backup.BackupHandler;
 import org.apache.doris.backup.RestoreJob;
 import org.apache.doris.binlog.BinlogGcer;
@@ -42,7 +44,11 @@ import org.apache.doris.catalog.MetaIdGenerator.IdGeneratorBuffer;
 import org.apache.doris.catalog.OlapTable.OlapTableState;
 import org.apache.doris.catalog.Replica.ReplicaStatus;
 import org.apache.doris.catalog.TableIf.TableType;
+import org.apache.doris.catalog.constraint.Constraint;
+import org.apache.doris.catalog.constraint.ConstraintManager;
 import org.apache.doris.catalog.info.PartitionNamesInfo;
+import org.apache.doris.catalog.stream.BaseTableStream;
+import org.apache.doris.catalog.stream.TableStreamManager;
 import org.apache.doris.clone.ColocateTableCheckerAndBalancer;
 import org.apache.doris.clone.DynamicPartitionScheduler;
 import org.apache.doris.clone.TabletChecker;
@@ -72,13 +78,13 @@ import org.apache.doris.common.publish.TopicPublisher;
 import org.apache.doris.common.publish.TopicPublisherThread;
 import org.apache.doris.common.publish.WorkloadGroupPublisher;
 import org.apache.doris.common.util.Daemon;
+import org.apache.doris.common.util.DatasourcePrintableMap;
 import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.DynamicPartitionUtil;
 import org.apache.doris.common.util.HttpURLUtil;
 import org.apache.doris.common.util.MasterDaemon;
 import org.apache.doris.common.util.MetaLockUtils;
 import org.apache.doris.common.util.NetUtils;
-import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.common.util.SmallFileMgr;
 import org.apache.doris.common.util.TimeUtils;
@@ -93,10 +99,10 @@ import org.apache.doris.datasource.ExternalMetaIdMgr;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.datasource.SplitSourceManager;
 import org.apache.doris.datasource.es.EsExternalCatalog;
-import org.apache.doris.datasource.es.EsRepository;
 import org.apache.doris.datasource.hive.HiveTransactionMgr;
 import org.apache.doris.datasource.hive.event.MetastoreEventsProcessor;
 import org.apache.doris.datasource.iceberg.IcebergExternalTable;
+import org.apache.doris.datasource.iceberg.IcebergSysExternalTable;
 import org.apache.doris.datasource.jdbc.JdbcExternalTable;
 import org.apache.doris.datasource.paimon.PaimonExternalTable;
 import org.apache.doris.datasource.paimon.PaimonSysExternalTable;
@@ -380,6 +386,8 @@ public class Env {
     private GroupCommitManager groupCommitManager;
     private SqlBlockRuleMgr sqlBlockRuleMgr;
     private AuthenticationIntegrationMgr authenticationIntegrationMgr;
+    private AuthenticationIntegrationRuntime authenticationIntegrationRuntime;
+    private RoleMappingMgr roleMappingMgr;
     private ExportMgr exportMgr;
     private Alter alter;
     private ConsistencyChecker consistencyChecker;
@@ -460,7 +468,6 @@ public class Env {
     private ColocateTableIndex colocateTableIndex;
 
     private CatalogRecycleBin recycleBin;
-    private FunctionSet functionSet;
 
     // for nereids
     private FunctionRegistry functionRegistry;
@@ -538,6 +545,8 @@ public class Env {
 
     private BinlogManager binlogManager;
 
+    private ConstraintManager constraintManager;
+
     private BinlogGcer binlogGcer;
 
     private QueryCancelWorker queryCancelWorker;
@@ -587,6 +596,8 @@ public class Env {
     private AgentTaskCleanupDaemon agentTaskCleanupDaemon;
 
     private LineageEventProcessor lineageEventProcessor;
+
+    private TableStreamManager tableStreamManager;
 
     // if a config is relative to a daemon thread. record the relation here. we will proactively change interval of it.
     private final Map<String, Supplier<MasterDaemon>> configtoThreads = ImmutableMap
@@ -690,11 +701,19 @@ public class Env {
         return binlogManager;
     }
 
+    public ConstraintManager getConstraintManager() {
+        return constraintManager;
+    }
+
     public KeyManagerInterface getKeyManager() throws Exception {
         if (keyManager == null) {
             throw new Exception("The keyManager is null, possibly due to a missing implementation of KeyManager");
         }
         return keyManager;
+    }
+
+    public TableStreamManager getTableStreamManager() {
+        return tableStreamManager;
     }
 
     private static class SingletonHolder {
@@ -712,6 +731,8 @@ public class Env {
         this.groupCommitManager = new GroupCommitManager();
         this.sqlBlockRuleMgr = new SqlBlockRuleMgr();
         this.authenticationIntegrationMgr = new AuthenticationIntegrationMgr();
+        this.authenticationIntegrationRuntime = new AuthenticationIntegrationRuntime();
+        this.roleMappingMgr = new RoleMappingMgr();
         this.exportMgr = new ExportMgr();
         this.alter = new Alter();
         this.consistencyChecker = new ConsistencyChecker();
@@ -753,7 +774,6 @@ public class Env {
         this.tabletInvertedIndex = EnvFactory.getInstance().createTabletInvertedIndex();
         this.colocateTableIndex = new ColocateTableIndex();
         this.recycleBin = new CatalogRecycleBin();
-        this.functionSet = new FunctionSet();
 
         this.functionRegistry = new FunctionRegistry();
 
@@ -830,6 +850,7 @@ public class Env {
         this.queryStats = new QueryStats();
         this.hiveTransactionMgr = new HiveTransactionMgr();
         this.binlogManager = new BinlogManager();
+        this.constraintManager = new ConstraintManager();
         this.binlogGcer = new BinlogGcer();
         this.columnIdFlusher = new ColumnIdFlushDaemon();
         this.queryCancelWorker = new QueryCancelWorker(systemInfo);
@@ -851,10 +872,7 @@ public class Env {
         if (Config.agent_task_health_check_intervals_ms > 0) {
             this.agentTaskCleanupDaemon = new AgentTaskCleanupDaemon();
         }
-    }
-
-    public static Map<String, Long> getSessionReportTimeMap() {
-        return sessionReportTimeMap;
+        this.tableStreamManager = new TableStreamManager();
     }
 
     public void registerTempTableAndSession(Table table) {
@@ -1196,6 +1214,7 @@ public class Env {
         // 3. Load image first and replay edits
         this.editLog = new EditLog(nodeName);
         loadImage(this.imageDir); // load image file
+        migrateConstraintsFromTables(); // migrate old table-based constraints
         editLog.open(); // open bdb env
         this.globalTransactionMgr.setEditLog(editLog);
         this.idGenerator.setEditLog(editLog);
@@ -2006,8 +2025,7 @@ public class Env {
 
         // load and export job label cleaner thread
         labelCleaner.start();
-        // es repository
-        getInternalCatalog().getEsRepository().start();
+
         // domain resolver
         domainResolver.start();
         // fe disk updater
@@ -2503,13 +2521,14 @@ public class Env {
     }
 
     public long loadAuthenticationIntegrations(DataInputStream in, long checksum) throws IOException {
-        // TODO(authentication-integration): Re-enable image persistence
-        // when authentication integration is fully integrated.
-        // Consume persisted bytes to keep image stream alignment,
-        // but do not restore into in-memory state for now.
-        AuthenticationIntegrationMgr.read(in);
-        authenticationIntegrationMgr = new AuthenticationIntegrationMgr();
-        LOG.info("skip replay authentication integrations from image temporarily");
+        authenticationIntegrationMgr = AuthenticationIntegrationMgr.read(in);
+        LOG.info("finished replay authentication integrations from image");
+        return checksum;
+    }
+
+    public long loadRoleMappings(DataInputStream in, long checksum) throws IOException {
+        roleMappingMgr = RoleMappingMgr.read(in);
+        LOG.info("finished replay role mappings from image");
         return checksum;
     }
 
@@ -2585,6 +2604,18 @@ public class Env {
     public long saveDictionaryManager(CountingDataOutputStream out, long checksum) throws IOException {
         this.dictionaryManager.write(out);
         LOG.info("finished save dictMgr to image");
+        return checksum;
+    }
+
+    public long loadTableStreamManager(DataInputStream in, long checksum) throws IOException {
+        this.tableStreamManager = TableStreamManager.read(in);
+        LOG.info("finished replay TableStreamManager from image");
+        return checksum;
+    }
+
+    public long saveTableStreamManager(CountingDataOutputStream out, long checksum) throws IOException {
+        this.tableStreamManager.write(out);
+        LOG.info("finished save TableStreamManager to image");
         return checksum;
     }
 
@@ -2826,10 +2857,12 @@ public class Env {
     }
 
     public long saveAuthenticationIntegrations(CountingDataOutputStream out, long checksum) throws IOException {
-        // TODO(authentication-integration): Re-enable image persistence
-        // when authentication integration is fully integrated.
-        // Persist an empty manager temporarily.
-        new AuthenticationIntegrationMgr().write(out);
+        this.authenticationIntegrationMgr.write(out);
+        return checksum;
+    }
+
+    public long saveRoleMappings(CountingDataOutputStream out, long checksum) throws IOException {
+        this.roleMappingMgr.write(out);
         return checksum;
     }
 
@@ -2876,6 +2909,67 @@ public class Env {
         this.keyManagerStore.write(out);
         LOG.info("finished save KeyManager to image");
         return checksum;
+    }
+
+    public long saveConstraintManager(CountingDataOutputStream out, long checksum) throws IOException {
+        constraintManager.write(out);
+        LOG.info("finished save ConstraintManager to image");
+        return checksum;
+    }
+
+    public long loadConstraintManager(DataInputStream in, long checksum) throws IOException {
+        this.constraintManager = ConstraintManager.read(in);
+        LOG.info("finished replay ConstraintManager from image");
+        return checksum;
+    }
+
+    /**
+     * Migrate constraints from old table-based storage to ConstraintManager.
+     * Called after image loading to handle upgrade from old format.
+     */
+    @SuppressWarnings("unchecked")
+    public void migrateConstraintsFromTables() {
+        if (!constraintManager.isEmpty()) {
+            return;
+        }
+        int migratedCount = 0;
+        for (CatalogIf catalog : catalogMgr.getCopyOfCatalog()) {
+            if (!(catalog instanceof InternalCatalog)) {
+                continue;
+            }
+            for (Object dbObj : catalog.getAllDbs()) {
+                DatabaseIf db = (DatabaseIf) dbObj;
+                for (Object tableObj : db.getTables()) {
+                    TableIf table = (TableIf) tableObj;
+                    try {
+                        Map<String, Constraint> oldConstraints = null;
+                        if (table instanceof Table) {
+                            oldConstraints = ((Table) table).getTableAttributes().getConstraintsMap();
+                        } else {
+                            LOG.debug("Skipping constraint migration for "
+                                    + "unsupported table type: {} ({})",
+                                    table.getName(),
+                                    table.getClass().getSimpleName());
+                        }
+                        if (oldConstraints != null && !oldConstraints.isEmpty()) {
+                            String qualifiedName = table.getNameWithFullQualifiers();
+                            constraintManager.migrateFromTable(
+                                    new TableNameInfo(qualifiedName), oldConstraints);
+                            migratedCount += oldConstraints.size();
+                            oldConstraints.clear();
+                        }
+                    } catch (Exception e) {
+                        LOG.warn("Failed to migrate constraints for table {}",
+                                table.getName(), e);
+                    }
+                }
+            }
+        }
+        if (migratedCount > 0) {
+            LOG.info("Migrated {} constraints from old table-based storage "
+                    + "to ConstraintManager", migratedCount);
+            constraintManager.rebuildForeignKeyReferences();
+        }
     }
 
     public void createLabelCleaner() {
@@ -3913,6 +4007,14 @@ public class Env {
             sb.append(olapTable.getTimeSeriesCompactionLevelThreshold()).append("\"");
         }
 
+        // vertical compaction num columns per group
+        if (olapTable.getVerticalCompactionNumColumnsPerGroup()
+                != PropertyAnalyzer.VERTICAL_COMPACTION_NUM_COLUMNS_PER_GROUP_DEFAULT_VALUE) {
+            sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_VERTICAL_COMPACTION_NUM_COLUMNS_PER_GROUP)
+                    .append("\" = \"");
+            sb.append(olapTable.getVerticalCompactionNumColumnsPerGroup()).append("\"");
+        }
+
         // Storage Vault
         if (!Strings.isNullOrEmpty(olapTable.getStorageVaultId())) {
             sb.append(",\n\"").append(PropertyAnalyzer
@@ -3950,6 +4052,12 @@ public class Env {
         // group commit data bytes
         sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_GROUP_COMMIT_DATA_BYTES).append("\" = \"");
         sb.append(olapTable.getGroupCommitDataBytes()).append("\"");
+
+        // group commit mode (only show when not off_mode)
+        if (!olapTable.getGroupCommitMode().equalsIgnoreCase(PropertyAnalyzer.GROUP_COMMIT_MODE_OFF)) {
+            sb.append(",\n\"").append(PropertyAnalyzer.PROPERTIES_GROUP_COMMIT_MODE).append("\" = \"");
+            sb.append(olapTable.getGroupCommitMode()).append("\"");
+        }
 
         // enable delete on delete predicate
         if (olapTable.getKeysType() == KeysType.UNIQUE_KEYS && olapTable.getEnableUniqueKeyMergeOnWrite()) {
@@ -4203,27 +4311,8 @@ public class Env {
             sb.append("\"table\" = \"").append(mysqlTable.getMysqlTableName()).append("\"\n");
             sb.append(")");
         } else if (table.getType() == TableType.ODBC) {
-            OdbcTable odbcTable = (OdbcTable) table;
-
-            addTableComment(odbcTable, sb);
-
-            // properties
-            sb.append("\nPROPERTIES (\n");
-            if (odbcTable.getOdbcCatalogResourceName() == null) {
-                sb.append("\"host\" = \"").append(odbcTable.getHost()).append("\",\n");
-                sb.append("\"port\" = \"").append(odbcTable.getPort()).append("\",\n");
-                sb.append("\"user\" = \"").append(odbcTable.getUserName()).append("\",\n");
-                sb.append("\"password\" = \"").append(hidePassword ? "" : odbcTable.getPasswd()).append("\",\n");
-                sb.append("\"driver\" = \"").append(odbcTable.getOdbcDriver()).append("\",\n");
-                sb.append("\"odbc_type\" = \"").append(odbcTable.getOdbcTableTypeName()).append("\",\n");
-                sb.append("\"charest\" = \"").append(odbcTable.getCharset()).append("\",\n");
-            } else {
-                sb.append("\"odbc_catalog_resource\" = \"").append(odbcTable.getOdbcCatalogResourceName())
-                    .append("\",\n");
-            }
-            sb.append("\"database\" = \"").append(odbcTable.getOdbcDatabaseName()).append("\",\n");
-            sb.append("\"table\" = \"").append(odbcTable.getOdbcTableName()).append("\"\n");
-            sb.append(")");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal ODBC tables are deprecated. Please use JDBC Catalog instead.");
         } else if (table.getType() == TableType.BROKER) {
             BrokerTable brokerTable = (BrokerTable) table;
 
@@ -4238,43 +4327,13 @@ public class Env {
             sb.append(")");
             if (!brokerTable.getBrokerProperties().isEmpty()) {
                 sb.append("\nBROKER PROPERTIES (\n");
-                sb.append(new PrintableMap<>(brokerTable.getBrokerProperties(), " = ", true, true,
+                sb.append(new DatasourcePrintableMap<>(brokerTable.getBrokerProperties(), " = ", true, true,
                         hidePassword).toString());
                 sb.append("\n)");
             }
         } else if (table.getType() == TableType.ELASTICSEARCH) {
-            EsTable esTable = (EsTable) table;
-
-            addTableComment(esTable, sb);
-
-            // partition
-            PartitionInfo partitionInfo = esTable.getPartitionInfo();
-            if (partitionInfo.getType() == PartitionType.RANGE) {
-                sb.append("\n");
-                sb.append("PARTITION BY RANGE(");
-                RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) partitionInfo;
-                for (Column column : rangePartitionInfo.getPartitionColumns()) {
-                    sb.append("`").append(column.getName()).append("`");
-                }
-                sb.append(")\n()");
-            }
-
-            // properties
-            sb.append("\nPROPERTIES (\n");
-            sb.append("\"hosts\" = \"").append(esTable.getHosts()).append("\",\n");
-            sb.append("\"user\" = \"").append(esTable.getUserName()).append("\",\n");
-            sb.append("\"password\" = \"").append(hidePassword ? "" : esTable.getPasswd()).append("\",\n");
-            sb.append("\"index\" = \"").append(esTable.getIndexName()).append("\",\n");
-            if (esTable.getMappingType() != null) {
-                sb.append("\"type\" = \"").append(esTable.getMappingType()).append("\",\n");
-            }
-            sb.append("\"enable_docvalue_scan\" = \"").append(esTable.isEnableDocValueScan()).append("\",\n");
-            sb.append("\"max_docvalue_fields\" = \"").append(esTable.getMaxDocValueFields()).append("\",\n");
-            sb.append("\"enable_keyword_sniff\" = \"").append(esTable.isEnableKeywordSniff()).append("\",\n");
-            sb.append("\"nodes_discovery\" = \"").append(esTable.isNodesDiscovery()).append("\",\n");
-            sb.append("\"http_ssl_enabled\" = \"").append(esTable.isHttpSslEnabled()).append("\",\n");
-            sb.append("\"like_push_down\" = \"").append(esTable.isLikePushDown()).append("\"\n");
-            sb.append(")");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal Elasticsearch tables are deprecated. Please use ES Catalog instead.");
         } else if (table.getType() == TableType.HIVE) {
             HiveTable hiveTable = (HiveTable) table;
 
@@ -4284,19 +4343,22 @@ public class Env {
             sb.append("\nPROPERTIES (\n");
             sb.append("\"database\" = \"").append(hiveTable.getHiveDb()).append("\",\n");
             sb.append("\"table\" = \"").append(hiveTable.getHiveTable()).append("\",\n");
-            sb.append(new PrintableMap<>(hiveTable.getHiveProperties(), " = ", true, true, hidePassword).toString());
+            sb.append(new DatasourcePrintableMap<>(hiveTable.getHiveProperties(),
+                    " = ", true, true, hidePassword).toString());
             sb.append("\n)");
         } else if (table.getType() == TableType.JDBC) {
-            JdbcTable jdbcTable = (JdbcTable) table;
-            addTableComment(jdbcTable, sb);
-            sb.append("\nPROPERTIES (\n");
-            sb.append("\"resource\" = \"").append(jdbcTable.getResourceName()).append("\",\n");
-            sb.append("\"table\" = \"").append(jdbcTable.getJdbcTable()).append("\",\n");
-            sb.append("\"table_type\" = \"").append(jdbcTable.getJdbcTypeName()).append("\"");
-            sb.append("\n)");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal JDBC tables are deprecated. Please use JDBC Catalog instead.");
         } else if (table.getType() == TableType.ICEBERG_EXTERNAL_TABLE) {
             addTableComment(table, sb);
-            IcebergExternalTable icebergExternalTable = (IcebergExternalTable) table;
+            IcebergExternalTable icebergExternalTable;
+            if (table instanceof IcebergExternalTable) {
+                icebergExternalTable = (IcebergExternalTable) table;
+            } else if (table instanceof IcebergSysExternalTable) {
+                icebergExternalTable = ((IcebergSysExternalTable) table).getSourceTable();
+            } else {
+                throw new RuntimeException("Unexpected Iceberg table type: " + table.getClass().getSimpleName());
+            }
             if (icebergExternalTable.hasSortOrder()) {
                 sb.append("\n").append(icebergExternalTable.getSortOrderSql());
             }
@@ -4405,7 +4467,29 @@ public class Env {
             return;
         }
 
-        // 1.2 other table type
+        // 1.2 stream
+        if (table.getType() == TableType.STREAM) {
+            BaseTableStream stream = (BaseTableStream) table;
+
+            sb.append("CREATE STREAM ");
+            sb.append('`').append(table.getName()).append('`').append('\n');
+            TableIf baseTable = stream.getBaseTableNullable();
+            if (baseTable != null) {
+                sb.append("ON TABLE ").append(baseTable.getNameWithFullQualifiers());
+            } else {
+                sb.append("ON TABLE ").append("UNKNOWN");
+            }
+            // (COMMENT STRING_LITERAL)?
+            addTableComment(table, sb);
+            // properties=propertyClause?
+            sb.append("\nPROPERTIES (\n");
+            stream.appendProperties(sb);
+            sb.append(")");
+            createTableStmt.add(sb + ";");
+            return;
+        }
+
+        // 1.3 other table type
         sb.append("CREATE ");
         if (table.getType() == TableType.ODBC || table.getType() == TableType.MYSQL
                 || table.getType() == TableType.ELASTICSEARCH || table.getType() == TableType.BROKER
@@ -4621,27 +4705,8 @@ public class Env {
             JdbcExternalTable jdbcTable = (JdbcExternalTable) table;
             addTableComment(jdbcTable, sb);
         } else if (table.getType() == TableType.ODBC) {
-            OdbcTable odbcTable = (OdbcTable) table;
-
-            addTableComment(odbcTable, sb);
-
-            // properties
-            sb.append("\nPROPERTIES (\n");
-            if (odbcTable.getOdbcCatalogResourceName() == null) {
-                sb.append("\"host\" = \"").append(odbcTable.getHost()).append("\",\n");
-                sb.append("\"port\" = \"").append(odbcTable.getPort()).append("\",\n");
-                sb.append("\"user\" = \"").append(odbcTable.getUserName()).append("\",\n");
-                sb.append("\"password\" = \"").append(hidePassword ? "" : odbcTable.getPasswd()).append("\",\n");
-                sb.append("\"driver\" = \"").append(odbcTable.getOdbcDriver()).append("\",\n");
-                sb.append("\"odbc_type\" = \"").append(odbcTable.getOdbcTableTypeName()).append("\",\n");
-                sb.append("\"charest\" = \"").append(odbcTable.getCharset()).append("\",\n");
-            } else {
-                sb.append("\"odbc_catalog_resource\" = \"").append(odbcTable.getOdbcCatalogResourceName())
-                        .append("\",\n");
-            }
-            sb.append("\"database\" = \"").append(odbcTable.getOdbcDatabaseName()).append("\",\n");
-            sb.append("\"table\" = \"").append(odbcTable.getOdbcTableName()).append("\"\n");
-            sb.append(")");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal ODBC tables are deprecated. Please use JDBC Catalog instead.");
         } else if (table.getType() == TableType.BROKER) {
             BrokerTable brokerTable = (BrokerTable) table;
 
@@ -4656,43 +4721,13 @@ public class Env {
             sb.append(")");
             if (!brokerTable.getBrokerProperties().isEmpty()) {
                 sb.append("\nBROKER PROPERTIES (\n");
-                sb.append(new PrintableMap<>(brokerTable.getBrokerProperties(), " = ", true, true,
+                sb.append(new DatasourcePrintableMap<>(brokerTable.getBrokerProperties(), " = ", true, true,
                         hidePassword).toString());
                 sb.append("\n)");
             }
         } else if (table.getType() == TableType.ELASTICSEARCH) {
-            EsTable esTable = (EsTable) table;
-
-            addTableComment(esTable, sb);
-
-            // partition
-            PartitionInfo partitionInfo = esTable.getPartitionInfo();
-            if (partitionInfo.getType() == PartitionType.RANGE) {
-                sb.append("\n");
-                sb.append("PARTITION BY RANGE(");
-                RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) partitionInfo;
-                for (Column column : rangePartitionInfo.getPartitionColumns()) {
-                    sb.append("`").append(column.getName()).append("`");
-                }
-                sb.append(")\n()");
-            }
-
-            // properties
-            sb.append("\nPROPERTIES (\n");
-            sb.append("\"hosts\" = \"").append(esTable.getHosts()).append("\",\n");
-            sb.append("\"user\" = \"").append(esTable.getUserName()).append("\",\n");
-            sb.append("\"password\" = \"").append(hidePassword ? "" : esTable.getPasswd()).append("\",\n");
-            sb.append("\"index\" = \"").append(esTable.getIndexName()).append("\",\n");
-            if (esTable.getMappingType() != null) {
-                sb.append("\"type\" = \"").append(esTable.getMappingType()).append("\",\n");
-            }
-            sb.append("\"enable_docvalue_scan\" = \"").append(esTable.isEnableDocValueScan()).append("\",\n");
-            sb.append("\"max_docvalue_fields\" = \"").append(esTable.getMaxDocValueFields()).append("\",\n");
-            sb.append("\"enable_keyword_sniff\" = \"").append(esTable.isEnableKeywordSniff()).append("\",\n");
-            sb.append("\"nodes_discovery\" = \"").append(esTable.isNodesDiscovery()).append("\",\n");
-            sb.append("\"http_ssl_enabled\" = \"").append(esTable.isHttpSslEnabled()).append("\",\n");
-            sb.append("\"like_push_down\" = \"").append(esTable.isLikePushDown()).append("\"\n");
-            sb.append(")");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal Elasticsearch tables are deprecated. Please use ES Catalog instead.");
         } else if (table.getType() == TableType.HIVE) {
             HiveTable hiveTable = (HiveTable) table;
 
@@ -4702,19 +4737,22 @@ public class Env {
             sb.append("\nPROPERTIES (\n");
             sb.append("\"database\" = \"").append(hiveTable.getHiveDb()).append("\",\n");
             sb.append("\"table\" = \"").append(hiveTable.getHiveTable()).append("\",\n");
-            sb.append(new PrintableMap<>(hiveTable.getHiveProperties(), " = ", true, true, hidePassword).toString());
+            sb.append(new DatasourcePrintableMap<>(hiveTable.getHiveProperties(),
+                    " = ", true, true, hidePassword).toString());
             sb.append("\n)");
         } else if (table.getType() == TableType.JDBC) {
-            JdbcTable jdbcTable = (JdbcTable) table;
-            addTableComment(jdbcTable, sb);
-            sb.append("\nPROPERTIES (\n");
-            sb.append("\"resource\" = \"").append(jdbcTable.getResourceName()).append("\",\n");
-            sb.append("\"table\" = \"").append(jdbcTable.getJdbcTable()).append("\",\n");
-            sb.append("\"table_type\" = \"").append(jdbcTable.getJdbcTypeName()).append("\"");
-            sb.append("\n)");
+            addTableComment(table, sb);
+            sb.append("\n-- Internal JDBC tables are deprecated. Please use JDBC Catalog instead.");
         } else if (table.getType() == TableType.ICEBERG_EXTERNAL_TABLE) {
             addTableComment(table, sb);
-            IcebergExternalTable icebergExternalTable = (IcebergExternalTable) table;
+            IcebergExternalTable icebergExternalTable;
+            if (table instanceof IcebergExternalTable) {
+                icebergExternalTable = (IcebergExternalTable) table;
+            } else if (table instanceof IcebergSysExternalTable) {
+                icebergExternalTable = ((IcebergSysExternalTable) table).getSourceTable();
+            } else {
+                throw new RuntimeException("Unexpected Iceberg table type: " + table.getClass().getSimpleName());
+            }
             if (icebergExternalTable.hasSortOrder()) {
                 sb.append("\n").append(icebergExternalTable.getSortOrderSql());
             }
@@ -4826,6 +4864,9 @@ public class Env {
             if (table instanceof MTMV) {
                 ((MTMV) table).compatible(Env.getCurrentEnv().getCatalogMgr());
             }
+            if (table instanceof BaseTableStream) {
+                getTableStreamManager().addTableStream((BaseTableStream) table);
+            }
         } else {
             ExternalCatalog externalCatalog = (ExternalCatalog) catalogMgr.getCatalog(info.getCtlName());
             if (externalCatalog != null) {
@@ -4845,30 +4886,42 @@ public class Env {
             throw new DdlException("DropMTMVCommand is null");
         }
         DropMTMVInfo dropMTMVInfo = command.getDropMTMVInfo();
-        dropTable(dropMTMVInfo.getCatalogName(), dropMTMVInfo.getDbName(), dropMTMVInfo.getTableName(), false,
-                true, dropMTMVInfo.isIfExists(), false, true);
+        dropTable(dropMTMVInfo.getCatalogName(), dropMTMVInfo.getDbName(), dropMTMVInfo.getTableName(), false, true,
+                false, dropMTMVInfo.isIfExists(), false, true);
     }
 
     public void dropTable(String catalogName, String dbName, String tableName, boolean isView, boolean isMtmv,
-                          boolean ifExists, boolean mustTemporary, boolean force) throws DdlException {
+                          boolean isStream, boolean ifExists, boolean mustTemporary, boolean force)
+            throws DdlException {
         CatalogIf<?> catalogIf = catalogMgr.getCatalogOrException(catalogName,
                 catalog -> new DdlException(("Unknown catalog " + catalog)));
-        catalogIf.dropTable(dbName, tableName, isView, isMtmv, ifExists, mustTemporary, force);
+        catalogIf.dropTable(dbName, tableName, isView, isMtmv, isStream, ifExists, mustTemporary, force);
     }
 
     public void dropView(String catalogName, String dbName, String tableName, boolean ifExists) throws DdlException {
         CatalogIf<?> catalogIf = catalogMgr.getCatalogOrException(catalogName,
                 catalog -> new DdlException(("Unknown catalog " + catalog)));
-        catalogIf.dropTable(dbName, tableName, true, false, ifExists,  false, false);
+        catalogIf.dropTable(dbName, tableName, true, false, false, ifExists,  false, false);
+    }
+
+    public void dropStream(String catalogName, String dbName, String tableName, boolean ifExists,
+                           boolean force) throws DdlException {
+        if (!Config.enable_table_stream) {
+            throw new DdlException("Table Stream is experimental."
+                    + " Please set enable_table_stream=true to enable it.");
+        }
+        CatalogIf<?> catalogIf = catalogMgr.getCatalogOrException(catalogName,
+                catalog -> new DdlException(("Unknown catalog " + catalog)));
+        catalogIf.dropTable(dbName, tableName, false, false, true, ifExists,  false, force);
     }
 
     public boolean unprotectDropTable(Database db, Table table, boolean isForceDrop, boolean isReplay,
-                                      Long recycleTime) {
+                                      Long recycleTime) throws DdlException {
         return getInternalCatalog().unprotectDropTable(db, table, isForceDrop, isReplay, recycleTime);
     }
 
     public void replayDropTable(Database db, long tableId, boolean isForceDrop,
-                                Long recycleTime) throws MetaNotFoundException {
+                                Long recycleTime) throws MetaNotFoundException, DdlException {
         getInternalCatalog().replayDropTable(db, tableId, isForceDrop, recycleTime);
     }
 
@@ -5189,6 +5242,14 @@ public class Env {
         return authenticationIntegrationMgr;
     }
 
+    public RoleMappingMgr getRoleMappingMgr() {
+        return roleMappingMgr;
+    }
+
+    public AuthenticationIntegrationRuntime getAuthenticationIntegrationRuntime() {
+        return authenticationIntegrationRuntime;
+    }
+
     public RoutineLoadTaskScheduler getRoutineLoadTaskScheduler() {
         return routineLoadTaskScheduler;
     }
@@ -5287,9 +5348,7 @@ public class Env {
         return this.masterInfo.getHost();
     }
 
-    public EsRepository getEsRepository() {
-        return getInternalCatalog().getEsRepository();
-    }
+
 
     public PolicyMgr getPolicyMgr() {
         return this.policyMgr;
@@ -5529,6 +5588,11 @@ public class Env {
                 TableInfo tableInfo = TableInfo.createForTableRename(db.getId(), table.getId(), oldTableName,
                         newTableName);
                 editLog.logTableRename(tableInfo);
+                constraintManager.renameTable(
+                        new TableNameInfo(InternalCatalog.INTERNAL_CATALOG_NAME,
+                                db.getFullName(), oldTableName),
+                        new TableNameInfo(InternalCatalog.INTERNAL_CATALOG_NAME,
+                                db.getFullName(), newTableName));
                 LOG.info("rename table[{}] to {}", oldTableName, newTableName);
             } finally {
                 table.writeUnlock();
@@ -5560,6 +5624,11 @@ public class Env {
                 db.unregisterTable(tableName);
                 table.setName(newTableName);
                 db.registerTable(table);
+                constraintManager.renameTable(
+                        new TableNameInfo(InternalCatalog.INTERNAL_CATALOG_NAME,
+                                db.getFullName(), tableName),
+                        new TableNameInfo(InternalCatalog.INTERNAL_CATALOG_NAME,
+                                db.getFullName(), newTableName));
                 LOG.info("replay rename table[{}] to {}", tableName, newTableName);
             } finally {
                 table.writeUnlock();
@@ -6137,6 +6206,7 @@ public class Env {
                 .buildEnableSingleReplicaCompaction()
                 .buildTimeSeriesCompactionEmptyRowsetsThreshold()
                 .buildTimeSeriesCompactionLevelThreshold()
+                .buildVerticalCompactionNumColumnsPerGroup()
                 .buildTTLSeconds()
                 .buildAutoAnalyzeProperty()
                 .buildPartitionRetentionCount();
@@ -6416,14 +6486,6 @@ public class Env {
 
     public FunctionRegistry getFunctionRegistry() {
         return functionRegistry;
-    }
-
-    public boolean isNondeterministicFunction(String funcName) {
-        return functionSet.isNondeterministicFunction(funcName);
-    }
-
-    public boolean isNullResultWithOneNullParamFunction(String funcName) {
-        return functionSet.isNullResultWithOneNullParamFunctions(funcName);
     }
 
     @Deprecated

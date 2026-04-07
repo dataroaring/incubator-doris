@@ -21,7 +21,6 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.thrift.TColumnAccessPath;
 import org.apache.doris.thrift.TSlotDescriptor;
@@ -147,10 +146,6 @@ public class SlotDescriptor {
         this.column = column;
         this.type = column.getType();
         this.caption = column.getName();
-    }
-
-    public void setSrcColumn(Column column) {
-        this.column = column;
     }
 
     public boolean isAutoInc() {
@@ -300,9 +295,4 @@ public class SlotDescriptor {
                 .append("}")
                 .toString();
     }
-
-    public boolean isScanSlot() {
-        return parent.getTable() instanceof OlapTable;
-    }
-
 }
