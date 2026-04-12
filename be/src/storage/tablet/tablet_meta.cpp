@@ -63,7 +63,6 @@ using std::unordered_map;
 using std::vector;
 
 namespace doris {
-#include "common/compile_check_begin.h"
 using namespace ErrorCode;
 
 bvar::Adder<uint64_t> g_contains_agg_with_cache_if_eligible_total(
@@ -125,7 +124,10 @@ TabletMetaSharedPtr TabletMeta::create(
             request.time_series_compaction_time_threshold_seconds,
             request.time_series_compaction_empty_rowsets_threshold,
             request.time_series_compaction_level_threshold, inverted_index_file_storage_format,
-            request.tde_algorithm, storage_format);
+            request.tde_algorithm, storage_format,
+            request.__isset.vertical_compaction_num_columns_per_group
+                    ? request.vertical_compaction_num_columns_per_group
+                    : 5);
 }
 
 TabletMeta::~TabletMeta() {
@@ -154,7 +156,8 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
                        int64_t time_series_compaction_level_threshold,
                        TInvertedIndexFileStorageFormat::type inverted_index_file_storage_format,
                        TEncryptionAlgorithm::type tde_algorithm,
-                       TStorageFormat::type storage_format)
+                       TStorageFormat::type storage_format,
+                       int32_t vertical_compaction_num_columns_per_group)
         : _tablet_uid(0, 0),
           _schema(new TabletSchema),
           _delete_bitmap(new DeleteBitmap(tablet_id)),
@@ -187,6 +190,8 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
             time_series_compaction_empty_rowsets_threshold);
     tablet_meta_pb.set_time_series_compaction_level_threshold(
             time_series_compaction_level_threshold);
+    tablet_meta_pb.set_vertical_compaction_num_columns_per_group(
+            vertical_compaction_num_columns_per_group);
     TabletSchemaPB* schema = tablet_meta_pb.mutable_schema();
     schema->set_num_short_key_columns(tablet_schema.short_key_column_count);
     schema->set_num_rows_per_row_block(config::default_num_rows_per_column_file_block);
@@ -358,6 +363,7 @@ TabletMeta::TabletMeta(int64_t table_id, int64_t partition_id, int64_t tablet_id
         schema->set_disable_auto_compaction(tablet_schema.disable_auto_compaction);
     }
 
+    // Deprecated legacy flatten-nested switch. Distinct from variant_enable_nested_group.
     if (tablet_schema.__isset.variant_enable_flatten_nested) {
         schema->set_enable_variant_flatten_nested(tablet_schema.variant_enable_flatten_nested);
     }
@@ -464,7 +470,9 @@ TabletMeta::TabletMeta(const TabletMeta& b)
                   b._time_series_compaction_time_threshold_seconds),
           _time_series_compaction_empty_rowsets_threshold(
                   b._time_series_compaction_empty_rowsets_threshold),
-          _time_series_compaction_level_threshold(b._time_series_compaction_level_threshold) {};
+          _time_series_compaction_level_threshold(b._time_series_compaction_level_threshold),
+          _vertical_compaction_num_columns_per_group(
+                  b._vertical_compaction_num_columns_per_group) {};
 
 void TabletMeta::init_column_from_tcolumn(uint32_t unique_id, const TColumn& tcolumn,
                                           ColumnPB* column) {
@@ -552,8 +560,8 @@ void TabletMeta::init_column_from_tcolumn(uint32_t unique_id, const TColumn& tco
     if (tcolumn.__isset.variant_sparse_hash_shard_count) {
         column->set_variant_sparse_hash_shard_count(tcolumn.variant_sparse_hash_shard_count);
     }
-    if (tcolumn.__isset.variant_enable_doc_mode) {
-        column->set_variant_enable_doc_mode(tcolumn.variant_enable_doc_mode);
+    if (tcolumn.column_type.__isset.variant_enable_doc_mode) {
+        column->set_variant_enable_doc_mode(tcolumn.column_type.variant_enable_doc_mode);
     }
     if (tcolumn.__isset.variant_doc_materialization_min_rows) {
         column->set_variant_doc_materialization_min_rows(
@@ -857,6 +865,8 @@ void TabletMeta::init_from_pb(const TabletMetaPB& tablet_meta_pb) {
             tablet_meta_pb.time_series_compaction_empty_rowsets_threshold();
     _time_series_compaction_level_threshold =
             tablet_meta_pb.time_series_compaction_level_threshold();
+    _vertical_compaction_num_columns_per_group =
+            tablet_meta_pb.vertical_compaction_num_columns_per_group();
 
     if (tablet_meta_pb.has_encryption_algorithm()) {
         _encryption_algorithm = tablet_meta_pb.encryption_algorithm();
@@ -952,6 +962,8 @@ void TabletMeta::to_meta_pb(TabletMetaPB* tablet_meta_pb, bool cloud_get_rowset_
             time_series_compaction_empty_rowsets_threshold());
     tablet_meta_pb->set_time_series_compaction_level_threshold(
             time_series_compaction_level_threshold());
+    tablet_meta_pb->set_vertical_compaction_num_columns_per_group(
+            vertical_compaction_num_columns_per_group());
 
     tablet_meta_pb->set_encryption_algorithm(_encryption_algorithm);
 }
@@ -1828,5 +1840,4 @@ std::string tablet_state_name(TabletState state) {
     }
 }
 
-#include "common/compile_check_end.h"
 } // namespace doris

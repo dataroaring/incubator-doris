@@ -32,7 +32,6 @@ namespace doris {
 class ExecNode;
 class RuntimeState;
 
-#include "common/compile_check_begin.h"
 class DistinctStreamingAggOperatorX;
 
 class DistinctStreamingAggLocalState final : public PipelineXLocalState<FakeSharedState> {
@@ -84,6 +83,8 @@ private:
     RuntimeProfile::Counter* _hash_table_input_counter = nullptr;
     RuntimeProfile::Counter* _hash_table_size_counter = nullptr;
     RuntimeProfile::Counter* _insert_keys_to_column_timer = nullptr;
+
+    bool _is_single_backend = false;
 };
 
 class DistinctStreamingAggOperatorX final
@@ -153,4 +154,3 @@ private:
 };
 
 } // namespace doris
-#include "common/compile_check_end.h"

@@ -20,8 +20,10 @@
 
 package org.apache.doris.planner;
 
+import org.apache.doris.analysis.ColumnAccessPath;
 import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.ExprSubstitutionMap;
 import org.apache.doris.analysis.ExprToSqlVisitor;
 import org.apache.doris.analysis.ExprToThriftVisitor;
 import org.apache.doris.analysis.SlotDescriptor;
@@ -38,8 +40,6 @@ import org.apache.doris.datasource.iceberg.source.IcebergScanNode;
 import org.apache.doris.planner.normalize.ExprNormalizeVisitor;
 import org.apache.doris.planner.normalize.Normalizer;
 import org.apache.doris.qe.ConnectContext;
-import org.apache.doris.thrift.TAccessPathType;
-import org.apache.doris.thrift.TColumnAccessPath;
 import org.apache.doris.thrift.TExplainLevel;
 import org.apache.doris.thrift.TExpr;
 import org.apache.doris.thrift.TNormalizedPlanNode;
@@ -85,7 +85,6 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
     protected String planNodeName;
 
     protected PlanNodeId id;  // unique w/in plan tree; assigned by planner
-    protected PlanFragmentId fragmentId;  // assigned by planner after fragmentation step
     protected long limit; // max. # of rows to be returned; 0: no limit
     protected long offset;
 
@@ -743,6 +742,21 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
         return projectList;
     }
 
+    public List<Expr> getPointQueryProjectList() {
+        if (CollectionUtils.isEmpty(projectList) || intermediateProjectListList.isEmpty()) {
+            return projectList;
+        }
+
+        List<Expr> flattenedProjectList = Expr.cloneList(projectList);
+        for (int i = intermediateProjectListList.size() - 1; i >= 0; --i) {
+            flattenedProjectList = Expr.cloneList(
+                    flattenedProjectList,
+                    createPointQueryProjectionSmap(intermediateOutputTupleDescList.get(i),
+                            intermediateProjectListList.get(i)));
+        }
+        return flattenedProjectList;
+    }
+
     public void setCardinalityAfterFilter(long cardinalityAfterFilter) {
         this.cardinalityAfterFilter = cardinalityAfterFilter;
     }
@@ -771,6 +785,20 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
 
     public void addIntermediateProjectList(List<Expr> exprs) {
         intermediateProjectListList.add(exprs);
+    }
+
+    private ExprSubstitutionMap createPointQueryProjectionSmap(
+            TupleDescriptor outputTupleDesc, List<Expr> projectionExprs) {
+        List<SlotDescriptor> outputSlots = outputTupleDesc.getSlots();
+        Preconditions.checkState(outputSlots.size() == projectionExprs.size(),
+                "point query projection slot size %s does not match expr size %s",
+                outputSlots.size(), projectionExprs.size());
+
+        ExprSubstitutionMap substitutionMap = new ExprSubstitutionMap();
+        for (int i = 0; i < outputSlots.size(); ++i) {
+            substitutionMap.put(new SlotRef(outputSlots.get(i)), projectionExprs.get(i));
+        }
+        return substitutionMap;
     }
 
     public <T extends PlanNode> List<T> collectInCurrentFragment(Predicate<PlanNode> predicate) {
@@ -834,13 +862,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
                 } else {
                     displayAllAccessPathsString = slot.getDisplayAllAccessPaths()
                             .stream()
-                            .map(a -> {
-                                if (a.type == TAccessPathType.DATA) {
-                                    return StringUtils.join(a.data_access_path.path, ".");
-                                } else {
-                                    return StringUtils.join(a.meta_access_path.path, ".");
-                                }
-                            })
+                            .map(a -> StringUtils.join(a.getPath(), "."))
                             .collect(Collectors.joining(", "));
                 }
             }
@@ -856,13 +878,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
                 } else {
                     displayPredicateAccessPathsString = slot.getPredicateAccessPaths()
                             .stream()
-                            .map(a -> {
-                                if (a.type == TAccessPathType.DATA) {
-                                    return StringUtils.join(a.data_access_path.path, ".");
-                                } else {
-                                    return StringUtils.join(a.meta_access_path.path, ".");
-                                }
-                            })
+                            .map(a -> StringUtils.join(a.getPath(), "."))
                             .collect(Collectors.joining(", "));
                 }
             }
@@ -895,15 +911,13 @@ public abstract class PlanNode extends TreeNode<PlanNode> {
     }
 
     private String mergeIcebergAccessPathsWithId(
-            List<TColumnAccessPath> accessPaths, List<TColumnAccessPath> displayAccessPaths) {
+            List<ColumnAccessPath> accessPaths, List<ColumnAccessPath> displayAccessPaths) {
         List<String> mergeDisplayAccessPaths = Lists.newArrayList();
         for (int i = 0; i < displayAccessPaths.size(); i++) {
-            TColumnAccessPath displayAccessPath = displayAccessPaths.get(i);
-            TColumnAccessPath idAccessPath = accessPaths.get(i);
-            List<String> nameAccessPathStrings = displayAccessPath.type == TAccessPathType.DATA
-                    ? displayAccessPath.data_access_path.path : displayAccessPath.meta_access_path.path;
-            List<String> idAccessPathStrings = idAccessPath.type == TAccessPathType.DATA
-                    ? idAccessPath.data_access_path.path : idAccessPath.meta_access_path.path;
+            ColumnAccessPath displayAccessPath = displayAccessPaths.get(i);
+            ColumnAccessPath idAccessPath = accessPaths.get(i);
+            List<String> nameAccessPathStrings = displayAccessPath.getPath();
+            List<String> idAccessPathStrings = idAccessPath.getPath();
 
             List<String> mergedPath = new ArrayList<>();
             for (int j = 0; j < idAccessPathStrings.size(); j++) {

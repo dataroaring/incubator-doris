@@ -27,7 +27,6 @@
 #include "core/custom_allocator.h"
 
 namespace doris {
-#include "common/compile_check_begin.h"
 
 inline uint32_t hash_join_table_calc_bucket_size(size_t num_elem) {
     size_t expect_bucket_size = num_elem + (num_elem - 1) / 7;
@@ -77,6 +76,12 @@ public:
     size_t size() const { return next.size(); }
 
     DorisVector<uint8_t>& get_visited() { return visited; }
+
+    const DorisVector<uint32_t>& get_first() const { return first; }
+
+    const DorisVector<uint32_t>& get_next() const { return next; }
+
+    const Key* get_build_keys() const { return build_keys; }
 
     bool empty_build_side() const { return _empty_build_side; }
 
@@ -137,6 +142,14 @@ public:
             return _find_batch_inner_outer_join<JoinOpType>(keys, build_idx_map, probe_idx,
                                                             build_idx, probe_rows, probe_idxs,
                                                             probe_visited, build_idxs);
+        }
+        // ASOF JOIN: for each probe row, find one matching build row (the closest match)
+        // The actual closest match logic is handled in ProcessHashTableProbe
+        if (JoinOpType == TJoinOp::ASOF_LEFT_INNER_JOIN ||
+            JoinOpType == TJoinOp::ASOF_LEFT_OUTER_JOIN) {
+            // Use conjunct path to get all matching rows, then filter in ProcessHashTableProbe
+            return _find_batch_conjunct<JoinOpType, false>(
+                    keys, build_idx_map, probe_idx, build_idx, probe_rows, probe_idxs, build_idxs);
         }
         if (JoinOpType == TJoinOp::LEFT_ANTI_JOIN || JoinOpType == TJoinOp::LEFT_SEMI_JOIN ||
             JoinOpType == TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN) {
@@ -331,7 +344,8 @@ private:
                           JoinOpType == TJoinOp::LEFT_SEMI_JOIN ||
                           JoinOpType == TJoinOp::LEFT_ANTI_JOIN ||
                           JoinOpType == doris::TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN ||
-                          JoinOpType == doris::TJoinOp::NULL_AWARE_LEFT_SEMI_JOIN) {
+                          JoinOpType == doris::TJoinOp::NULL_AWARE_LEFT_SEMI_JOIN ||
+                          JoinOpType == TJoinOp::ASOF_LEFT_OUTER_JOIN) {
                 // may over batch_size when emplace 0 into build_idxs
                 if (!build_idx) {
                     probe_idxs[matched_cnt] = probe_idx;
@@ -498,5 +512,4 @@ private:
 
 template <typename Key, typename Hash, bool DirectMapping>
 using JoinHashMap = JoinHashTable<Key, Hash, DirectMapping>;
-#include "common/compile_check_end.h"
 } // namespace doris

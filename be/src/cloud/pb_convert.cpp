@@ -24,7 +24,6 @@
 #include "common/logging.h"
 
 namespace doris::cloud {
-#include "common/compile_check_begin.h"
 
 RowsetMetaCloudPB doris_rowset_meta_to_cloud(const RowsetMetaPB& in) {
     RowsetMetaCloudPB out;
@@ -113,6 +112,9 @@ void doris_rowset_meta_to_cloud(RowsetMetaCloudPB* out, const RowsetMetaPB& in) 
     if (in.has_job_id()) {
         out->set_job_id(in.job_id());
     }
+    if (in.has_commit_tso()) {
+        out->set_commit_tso(in.commit_tso());
+    }
 }
 
 void doris_rowset_meta_to_cloud(RowsetMetaCloudPB* out, RowsetMetaPB&& in) {
@@ -191,6 +193,9 @@ void doris_rowset_meta_to_cloud(RowsetMetaCloudPB* out, RowsetMetaPB&& in) {
     }
     if (in.has_job_id()) {
         out->set_job_id(in.job_id());
+    }
+    if (in.has_commit_tso()) {
+        out->set_commit_tso(in.commit_tso());
     }
 }
 
@@ -281,6 +286,9 @@ void cloud_rowset_meta_to_doris(RowsetMetaPB* out, const RowsetMetaCloudPB& in) 
     if (in.has_job_id()) {
         out->set_job_id(in.job_id());
     }
+    if (in.has_commit_tso()) {
+        out->set_commit_tso(in.commit_tso());
+    }
 }
 
 void cloud_rowset_meta_to_doris(RowsetMetaPB* out, RowsetMetaCloudPB&& in) {
@@ -358,6 +366,9 @@ void cloud_rowset_meta_to_doris(RowsetMetaPB* out, RowsetMetaCloudPB&& in) {
     }
     if (in.has_job_id()) {
         out->set_job_id(in.job_id());
+    }
+    if (in.has_commit_tso()) {
+        out->set_commit_tso(in.commit_tso());
     }
 }
 
@@ -648,6 +659,8 @@ void doris_tablet_meta_to_cloud(TabletMetaCloudPB* out, const TabletMetaPB& in) 
     out->set_time_series_compaction_empty_rowsets_threshold(
             in.time_series_compaction_empty_rowsets_threshold());
     out->set_time_series_compaction_level_threshold(in.time_series_compaction_level_threshold());
+    out->set_vertical_compaction_num_columns_per_group(
+            in.vertical_compaction_num_columns_per_group());
     out->set_index_id(in.index_id());
     out->set_is_in_memory(in.is_in_memory());
     out->set_is_persistent(in.is_persistent());
@@ -725,6 +738,8 @@ void doris_tablet_meta_to_cloud(TabletMetaCloudPB* out, TabletMetaPB&& in) {
     out->set_time_series_compaction_empty_rowsets_threshold(
             in.time_series_compaction_empty_rowsets_threshold());
     out->set_time_series_compaction_level_threshold(in.time_series_compaction_level_threshold());
+    out->set_vertical_compaction_num_columns_per_group(
+            in.vertical_compaction_num_columns_per_group());
     out->set_index_id(in.index_id());
     out->set_is_in_memory(in.is_in_memory());
     out->set_is_persistent(in.is_persistent());
@@ -809,6 +824,8 @@ void cloud_tablet_meta_to_doris(TabletMetaPB* out, const TabletMetaCloudPB& in) 
     out->set_time_series_compaction_empty_rowsets_threshold(
             in.time_series_compaction_empty_rowsets_threshold());
     out->set_time_series_compaction_level_threshold(in.time_series_compaction_level_threshold());
+    out->set_vertical_compaction_num_columns_per_group(
+            in.vertical_compaction_num_columns_per_group());
     out->set_index_id(in.index_id());
     out->set_is_in_memory(in.is_in_memory());
     out->set_is_persistent(in.is_persistent());
@@ -886,6 +903,8 @@ void cloud_tablet_meta_to_doris(TabletMetaPB* out, TabletMetaCloudPB&& in) {
     out->set_time_series_compaction_empty_rowsets_threshold(
             in.time_series_compaction_empty_rowsets_threshold());
     out->set_time_series_compaction_level_threshold(in.time_series_compaction_level_threshold());
+    out->set_vertical_compaction_num_columns_per_group(
+            in.vertical_compaction_num_columns_per_group());
     out->set_index_id(in.index_id());
     out->set_is_in_memory(in.is_in_memory());
     out->set_is_persistent(in.is_persistent());
@@ -898,6 +917,5 @@ void cloud_tablet_meta_to_doris(TabletMetaPB* out, TabletMetaCloudPB&& in) {
         out->set_encryption_algorithm(in.encryption_algorithm());
     }
 }
-#include "common/compile_check_end.h"
 
 } // namespace doris::cloud

@@ -48,7 +48,6 @@ struct Slice;
 } // namespace doris
 
 namespace doris {
-#include "common/compile_check_begin.h"
 /**
  * Use to deserialize parquet page header, and get the page data in iterator interface.
  */
@@ -65,6 +64,7 @@ inline bool should_cache_decompressed(const tparquet::PageHeader* header,
                                       const tparquet::ColumnMetaData& metadata) {
     if (header->compressed_page_size <= 0) return true;
     if (metadata.codec == tparquet::CompressionCodec::UNCOMPRESSED) return true;
+    if (header->uncompressed_page_size == 0) return true;
 
     double ratio = static_cast<double>(header->uncompressed_page_size) /
                    static_cast<double>(header->compressed_page_size);
@@ -257,6 +257,5 @@ std::unique_ptr<PageReader<IN_COLLECTION, OFFSET_INDEX>> create_page_reader(
     return std::make_unique<PageReader<IN_COLLECTION, OFFSET_INDEX>>(
             reader, io_ctx, offset, length, total_rows, metadata, ctx, offset_index);
 }
-#include "common/compile_check_end.h"
 
 } // namespace doris

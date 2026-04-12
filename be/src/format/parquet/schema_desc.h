@@ -34,7 +34,6 @@
 #include "util/slice.h"
 
 namespace doris {
-#include "common/compile_check_begin.h"
 
 // Constant for unassigned column IDs
 constexpr uint64_t UNASSIGNED_COLUMN_ID = UINT64_MAX;
@@ -134,7 +133,7 @@ public:
      * Get the column(the first level schema element, maybe nested field) by index.
      * @param index Column index in _fields
      */
-    const FieldSchema* get_column(int index) const { return &_fields[index]; }
+    const FieldSchema* get_column(size_t index) const { return &_fields[index]; }
 
     /**
      * Get the column(the first level schema element, maybe nested field) by name.
@@ -166,6 +165,5 @@ public:
     void set_enable_mapping_varbinary(bool enable) { _enable_mapping_varbinary = enable; }
     void set_enable_mapping_timestamp_tz(bool enable) { _enable_mapping_timestamp_tz = enable; }
 };
-#include "common/compile_check_end.h"
 
 } // namespace doris

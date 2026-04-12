@@ -55,7 +55,6 @@ struct std::equal_to<doris::uint24_t> {
 };
 
 namespace doris {
-#include "common/compile_check_begin.h"
 /**
  * Use HybridSetType can avoid virtual function call in the loop.
  * @tparam Type
@@ -67,14 +66,6 @@ class InListPredicateBase final : public ColumnPredicate {
 public:
     ENABLE_FACTORY_CREATOR(InListPredicateBase);
     using T = typename PrimitiveTypeTraits<Type>::CppType;
-    using HybridSetType = std::conditional_t<
-            N >= 1 && N <= FIXED_CONTAINER_MAX_SIZE,
-            std::conditional_t<is_string_type(Type), StringSet<FixedContainer<std::string, N>>,
-                               HybridSet<Type, FixedContainer<T, N>,
-                                         PredicateColumnType<PredicateEvaluateType<Type>>>>,
-            std::conditional_t<is_string_type(Type), StringSet<DynamicContainer<std::string>>,
-                               HybridSet<Type, DynamicContainer<T>,
-                                         PredicateColumnType<PredicateEvaluateType<Type>>>>>;
     InListPredicateBase(uint32_t column_id, std::string col_name,
                         const std::shared_ptr<HybridSetBase>& hybrid_set, bool is_opposite,
                         size_t char_length = 0)
@@ -83,39 +74,52 @@ public:
               _max_value(type_limit<T>::min()) {
         CHECK(hybrid_set != nullptr);
 
-        if constexpr (is_string_type(Type) || Type == TYPE_DECIMALV2 || is_date_type(Type)) {
+        // String types need a copy because:
+        // 1. The caller's set is StringSet<DynamicContainer<std::string>>, but here we want
+        //    StringSet<FixedContainer<std::string, N>> for small-set optimization — different
+        //    C++ types, cannot share the pointer.
+        // 2. CHAR type additionally needs padding to char_length.
+        //
+        // Date/DECIMALV2 types do NOT need a copy: their ElementType (CppType) is identical
+        // between the caller's HybridSet and InListPredicateBase's, and InListPredicateBase
+        // only calls _values->find() / begin() / size() which are virtual and don't depend on
+        // the ColumnType template parameter difference.
+        if constexpr (is_string_type(Type)) {
+            using HybridSetType = std::conditional_t<N >= 1 && N <= FIXED_CONTAINER_MAX_SIZE,
+                                                     StringSet<FixedContainer<std::string, N>>,
+                                                     StringSet<DynamicContainer<std::string>>>;
             _values = std::make_shared<HybridSetType>(false);
-            if constexpr (is_string_type(Type)) {
-                HybridSetBase::IteratorBase* iter = hybrid_set->begin();
-                while (iter->has_next()) {
-                    const auto* value = (const StringRef*)(iter->get_value());
-                    if constexpr (Type == TYPE_CHAR) {
-                        _temp_datas.emplace_back("");
-                        _temp_datas.back().resize(std::max(char_length, value->size));
-                        memcpy(_temp_datas.back().data(), value->data, value->size);
-                        const std::string& str = _temp_datas.back();
-                        _values->insert((void*)str.data(), str.length());
-                    } else {
-                        _values->insert((void*)value->data, value->size);
-                    }
-                    iter->next();
+            HybridSetBase::IteratorBase* iter = hybrid_set->begin();
+            while (iter->has_next()) {
+                const auto* value = (const StringRef*)(iter->get_value());
+                if constexpr (Type == TYPE_CHAR) {
+                    _temp_datas.emplace_back("");
+                    _temp_datas.back().resize(std::max(char_length, value->size));
+                    memcpy(_temp_datas.back().data(), value->data, value->size);
+                    const std::string& str = _temp_datas.back();
+                    _values->insert((void*)str.data(), str.length());
+                } else {
+                    _values->insert((void*)value->data, value->size);
                 }
-            } else {
-                HybridSetBase::IteratorBase* iter = hybrid_set->begin();
-                while (iter->has_next()) {
-                    const void* value = iter->get_value();
-                    _values->insert(value);
-                    iter->next();
-                }
+                iter->next();
             }
         } else {
-            // shared from the caller, so it needs to be shared ptr
+            // Non-string types: directly share the caller's hybrid_set.
+            // The caller's set already contains the correct FixedContainer/DynamicContainer
+            // specialization; _values->find() dispatches to it via virtual call.
             _values = hybrid_set;
         }
         HybridSetBase::IteratorBase* iter = _values->begin();
         while (iter->has_next()) {
-            const T* value = (const T*)(iter->get_value());
-            _update_min_max(*value);
+            if constexpr (is_string_type(Type)) {
+                // get_value() returns StringRef*, not std::string*
+                const auto* ref = (const StringRef*)(iter->get_value());
+                T str(ref->data, ref->size);
+                _update_min_max(str);
+            } else {
+                const T* value = (const T*)(iter->get_value());
+                _update_min_max(*value);
+            }
             iter->next();
         }
     }
@@ -142,13 +146,6 @@ public:
 
     PredicateType type() const override { return PT; }
 
-    bool could_be_erased() const override {
-        if ((PT == PredicateType::NOT_IN_LIST && !_opposite) ||
-            (PT == PredicateType::IN_LIST && _opposite)) {
-            return false;
-        }
-        return true;
-    }
     Status evaluate(const IndexFieldNameAndTypePair& name_with_type, IndexIterator* iterator,
                     uint32_t num_rows, roaring::Roaring* result) const override {
         if (iterator == nullptr) {
@@ -167,12 +164,18 @@ public:
         roaring::Roaring indices;
         HybridSetBase::IteratorBase* iter = _values->begin();
         while (iter->has_next()) {
-            const void* ptr = iter->get_value();
-            //            auto&& value = PrimitiveTypeConvertor<Type>::to_storage_field_type(
-            //                    *reinterpret_cast<const T*>(ptr));
             std::unique_ptr<InvertedIndexQueryParamFactory> query_param = nullptr;
-            RETURN_IF_ERROR(InvertedIndexQueryParamFactory::create_query_value<Type>((const T*)ptr,
-                                                                                     query_param));
+            if constexpr (is_string_type(Type)) {
+                // get_value() returns StringRef*, not std::string*
+                const auto* ref = (const StringRef*)(iter->get_value());
+                T str(ref->data, ref->size);
+                RETURN_IF_ERROR(InvertedIndexQueryParamFactory::create_query_value<Type>(
+                        &str, query_param));
+            } else {
+                const T* value = (const T*)(iter->get_value());
+                RETURN_IF_ERROR(InvertedIndexQueryParamFactory::create_query_value<Type>(
+                        value, query_param));
+            }
             InvertedIndexQueryType query_type = InvertedIndexQueryType::EQUAL_QUERY;
             InvertedIndexParam param;
             param.column_name = name_with_type.first;
@@ -412,44 +415,43 @@ public:
         if constexpr (PT == PredicateType::IN_LIST) {
             HybridSetBase::IteratorBase* iter = _values->begin();
             while (iter->has_next()) {
-                const T* value = (const T*)(iter->get_value());
-
                 auto test_bytes = [&]<typename V>(const V& val) {
                     return bf->test_bytes(const_cast<char*>(reinterpret_cast<const char*>(&val)),
                                           sizeof(V));
                 };
 
-                // Small integers (TINYINT, SMALLINT, INTEGER) -> hash as int32
-                if constexpr (Type == PrimitiveType::TYPE_TINYINT ||
-                              Type == PrimitiveType::TYPE_SMALLINT ||
-                              Type == PrimitiveType::TYPE_INT) {
-                    int32_t int32_value = static_cast<int32_t>(*value);
-                    if (test_bytes(int32_value)) {
-                        return true;
-                    }
-                } else if constexpr (Type == PrimitiveType::TYPE_BIGINT) {
-                    // BIGINT -> hash as int64
-                    if (test_bytes(*value)) {
-                        return true;
-                    }
-                } else if constexpr (Type == PrimitiveType::TYPE_DOUBLE) {
-                    // DOUBLE -> hash as double
-                    if (test_bytes(*value)) {
-                        return true;
-                    }
-                } else if constexpr (Type == PrimitiveType::TYPE_FLOAT) {
-                    // FLOAT -> hash as float
-                    if (test_bytes(*value)) {
-                        return true;
-                    }
-                } else if constexpr (is_string_type(Type)) {
-                    // VARCHAR/STRING -> hash bytes
-                    if (bf->test_bytes(value->data(), value->size())) {
+                if constexpr (is_string_type(Type)) {
+                    // get_value() returns StringRef*, not std::string*
+                    const auto* ref = (const StringRef*)(iter->get_value());
+                    if (bf->test_bytes(ref->data, ref->size)) {
                         return true;
                     }
                 } else {
-                    // Unsupported types: return true (accept)
-                    return true;
+                    const T* value = (const T*)(iter->get_value());
+                    // Small integers (TINYINT, SMALLINT, INTEGER) -> hash as int32
+                    if constexpr (Type == PrimitiveType::TYPE_TINYINT ||
+                                  Type == PrimitiveType::TYPE_SMALLINT ||
+                                  Type == PrimitiveType::TYPE_INT) {
+                        int32_t int32_value = static_cast<int32_t>(*value);
+                        if (test_bytes(int32_value)) {
+                            return true;
+                        }
+                    } else if constexpr (Type == PrimitiveType::TYPE_BIGINT) {
+                        if (test_bytes(*value)) {
+                            return true;
+                        }
+                    } else if constexpr (Type == PrimitiveType::TYPE_DOUBLE) {
+                        if (test_bytes(*value)) {
+                            return true;
+                        }
+                    } else if constexpr (Type == PrimitiveType::TYPE_FLOAT) {
+                        if (test_bytes(*value)) {
+                            return true;
+                        }
+                    } else {
+                        // Unsupported types: return true (accept)
+                        return true;
+                    }
                 }
                 iter->next();
             }
@@ -660,5 +662,4 @@ private:
     // temp string for char type column
     std::list<std::string> _temp_datas;
 };
-#include "common/compile_check_end.h"
 } //namespace doris

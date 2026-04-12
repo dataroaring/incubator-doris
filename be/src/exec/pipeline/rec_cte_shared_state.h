@@ -22,7 +22,6 @@
 #include "util/brpc_client_cache.h"
 
 namespace doris {
-#include "common/compile_check_begin.h"
 
 struct RecCTESharedState : public BasicSharedState {
     std::vector<TRecCTETarget> targets;
@@ -81,10 +80,9 @@ struct RecCTESharedState : public BasicSharedState {
                                      };
 
                                      SCOPED_TIMER(hash_table_emplace_timer);
-                                     for (; row < num_rows; ++row) {
-                                         agg_method.lazy_emplace(agg_state, row, creator,
-                                                                 creator_for_null_key);
-                                     }
+                                     lazy_emplace_batch_void(agg_method, agg_state, num_rows,
+                                                             creator, creator_for_null_key,
+                                                             [&](uint32_t r) { row = r; });
                                      COUNTER_UPDATE(hash_table_input_counter, num_rows);
                                  }},
                        agg_data->method_variant);
@@ -175,5 +173,4 @@ struct RecCTESharedState : public BasicSharedState {
     }
 };
 
-#include "common/compile_check_end.h"
 } // namespace doris

@@ -42,7 +42,6 @@
 #include "util/slice.h"
 
 namespace doris {
-#include "common/compile_check_begin.h"
 template <typename T>
 class ColumnStr;
 using ColumnString = ColumnStr<UInt32>;
@@ -80,7 +79,8 @@ public:
         return Status::NotSupported("read_dict_values_to_column is not supported");
     }
 
-    virtual MutableColumnPtr convert_dict_column_to_string_column(const ColumnInt32* dict_column) {
+    virtual Result<MutableColumnPtr> convert_dict_column_to_string_column(
+            const ColumnInt32* dict_column) {
         throw doris::Exception(ErrorCode::NOT_IMPLEMENTED_ERROR,
                                "Method convert_dict_column_to_string_column is not supported");
     }
@@ -157,6 +157,5 @@ protected:
     std::unique_ptr<RleBatchDecoder<uint32_t>> _index_batch_decoder;
     std::vector<uint32_t> _indexes;
 };
-#include "common/compile_check_end.h"
 
 } // namespace doris

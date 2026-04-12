@@ -17,6 +17,8 @@
 
 package org.apache.doris.qe;
 
+import org.apache.doris.analysis.DescriptorToThriftConverter;
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ExprToThriftVisitor;
 import org.apache.doris.analysis.Queriable;
 import org.apache.doris.catalog.OlapTable;
@@ -82,15 +84,16 @@ public class ShortCircuitQueryContext {
     public ShortCircuitQueryContext(Planner planner, Queriable analzyedQuery) throws TException {
         this.planner = planner;
         this.serializedDescTable = ByteString.copyFrom(
-                new TSerializer().serialize(planner.getDescTable().toThrift()));
+                new TSerializer().serialize(DescriptorToThriftConverter.toThrift(planner.getDescTable())));
         TQueryOptions options = planner.getQueryOptions() != null ? planner.getQueryOptions() : new TQueryOptions();
         this.serializedQueryOptions = ByteString.copyFrom(
                 new TSerializer().serialize(options));
         List<TExpr> exprs = new ArrayList<>();
         OlapScanNode olapScanNode = (OlapScanNode) planner.getScanNodes().get(0);
-        if (olapScanNode.getProjectList() != null) {
+        List<Expr> pointQueryProjectList = olapScanNode.getPointQueryProjectList();
+        if (pointQueryProjectList != null) {
             // project on scan node
-            exprs.addAll(olapScanNode.getProjectList().stream()
+            exprs.addAll(pointQueryProjectList.stream()
                     .map(ExprToThriftVisitor::treeToThrift).collect(Collectors.toList()));
         } else {
             // add output slots
