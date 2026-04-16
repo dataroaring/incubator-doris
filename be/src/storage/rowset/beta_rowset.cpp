@@ -89,6 +89,17 @@ Status load_segment_rows_from_footer(BetaRowsetSharedPtr rowset,
 Status check_segment_rows_consistency(const std::vector<uint32_t>& rows_from_meta,
                                       const std::vector<uint32_t>& rows_from_footer,
                                       int64_t tablet_id, const std::string& rowset_id) {
+    // When ignore_not_found_segment is true, some segments may have been skipped
+    // during loading, making footer vector smaller than meta vector. We cannot
+    // meaningfully verify consistency because compacted indices no longer align
+    // with meta indices, so skip the check entirely in this case.
+    if (config::ignore_not_found_segment && rows_from_footer.size() != rows_from_meta.size()) {
+        LOG(INFO) << "skip segment rows consistency check: footer has "
+                  << rows_from_footer.size() << " segments vs meta has "
+                  << rows_from_meta.size() << " segments"
+                  << ", tablet=" << tablet_id << ", rowset=" << rowset_id;
+        return Status::OK();
+    }
     DCHECK_EQ(rows_from_footer.size(), rows_from_meta.size());
     for (size_t i = 0; i < rows_from_footer.size(); i++) {
         if (rows_from_footer[i] != rows_from_meta[i]) {

@@ -31,6 +31,7 @@
 #include "cloud/cloud_tablet.h"
 #include "cloud/config.h"
 #include "common/cast_set.h"
+#include "common/config.h"
 #include "common/logging.h"
 #include "common/metrics/doris_metrics.h"
 #include "common/status.h"
@@ -483,11 +484,28 @@ Status BaseTablet::lookup_row_key(const Slice& encoded_key, TabletSchema* latest
                     std::static_pointer_cast<BetaRowset>(rs), segment_caches[i].get(), true, true));
         }
         auto& segments = segment_caches[i]->get_segments();
-        DCHECK_EQ(segments.size(), num_segments);
+        // When ignore_not_found_segment is true, some segments may have been
+        // skipped during loading, so the vector can be smaller than num_segments.
+        DCHECK(segments.size() == num_segments ||
+               (config::ignore_not_found_segment && segments.size() < num_segments));
 
         for (auto id : picked_segments) {
-            Status s = segments[id]->lookup_row_key(encoded_key, schema, with_seq_col, with_rowid,
-                                                    &loc, stats, encoded_seq_value);
+            // When segments were skipped, positional indexing by seg_id is unsafe.
+            // Fall back to find-by-id, matching the pattern in _get_segment_column_iterator.
+            segment_v2::SegmentSharedPtr seg;
+            if (LIKELY(cast_set<int>(segments.size()) == num_segments)) {
+                seg = segments[id];
+            } else {
+                auto it = std::find_if(
+                        segments.begin(), segments.end(),
+                        [id](const segment_v2::SegmentSharedPtr& s) { return s->id() == id; });
+                if (it == segments.end()) {
+                    continue; // segment was not found, skip
+                }
+                seg = *it;
+            }
+            Status s = seg->lookup_row_key(encoded_key, schema, with_seq_col, with_rowid,
+                                           &loc, stats, encoded_seq_value);
             if (s.is<KEY_NOT_FOUND>()) {
                 continue;
             }
