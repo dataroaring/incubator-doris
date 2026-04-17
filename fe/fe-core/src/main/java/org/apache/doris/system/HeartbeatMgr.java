@@ -60,6 +60,8 @@ import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -82,6 +84,12 @@ public class HeartbeatMgr extends MasterDaemon {
     private final ExecutorService abortTxnExecutor;
 
     private static volatile AtomicReference<TMasterInfo> masterInfo = new AtomicReference<>();
+
+    // SocketException covers ConnectException, NoRouteToHostException, BindException, etc.
+    // SocketTimeoutException extends InterruptedIOException so must be checked separately.
+    private static boolean isExpectedNetworkFailure(Throwable t) {
+        return t instanceof SocketException || t instanceof SocketTimeoutException;
+    }
 
     public HeartbeatMgr(SystemInfoService nodeMgr, boolean needRegisterMetric) {
         super("heartbeat mgr", Config.heartbeat_interval_second * 1000);
@@ -376,7 +384,7 @@ public class HeartbeatMgr extends MasterDaemon {
                 }
             } catch (Exception e) {
                 Throwable rootCause = Util.getRootCause(e);
-                if (rootCause instanceof java.net.ConnectException) {
+                if (isExpectedNetworkFailure(rootCause)) {
                     LOG.warn("backend heartbeat got exception, host: {}, error: {}",
                             backend.getHost(), Util.getRootCauseMessage(e));
                 } else {

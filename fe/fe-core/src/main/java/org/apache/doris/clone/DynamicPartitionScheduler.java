@@ -79,6 +79,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -160,6 +161,17 @@ public class DynamicPartitionScheduler extends MasterDaemon {
         defaultRuntimeInfo.put(CREATE_PARTITION_MSG, DEFAULT_RUNTIME_VALUE);
         defaultRuntimeInfo.put(DROP_PARTITION_MSG, DEFAULT_RUNTIME_VALUE);
         return defaultRuntimeInfo;
+    }
+
+    // Matches the error messages thrown by SystemInfoService / FederationBackendPolicy /
+    // StreamLoadHandler / InsertStreamTxnExecutor / LocalTableValuedFunction when no
+    // backend is alive or the requested replication num exceeds available backends.
+    private static boolean isBackendUnavailableError(String errMsg) {
+        if (errMsg == null) {
+            return false;
+        }
+        String lower = errMsg.toLowerCase(Locale.ROOT);
+        return lower.contains("no available backend") || lower.contains("available backends");
     }
 
     // exponential moving average
@@ -795,10 +807,9 @@ public class DynamicPartitionScheduler extends MasterDaemon {
                         clearCreatePartitionFailedMsg(olapTable.getId());
                     } catch (Exception e) {
                         recordCreatePartitionFailedMsg(db.getFullName(), tableName, e.getMessage(), olapTable.getId());
-                        String errMsg = e.getMessage();
-                        if (errMsg != null && errMsg.contains("available backend")) {
+                        if (isBackendUnavailableError(e.getMessage())) {
                             LOG.warn("db [{}-{}], table [{}-{}]'s dynamic partition has error: {}",
-                                    db.getId(), db.getName(), olapTable.getId(), olapTable.getName(), errMsg);
+                                    db.getId(), db.getName(), olapTable.getId(), olapTable.getName(), e.getMessage());
                         } else {
                             LOG.warn("db [{}-{}], table [{}-{}]'s dynamic partition has error",
                                     db.getId(), db.getName(), olapTable.getId(), olapTable.getName(), e);
